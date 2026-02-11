@@ -18,7 +18,9 @@ package benchmark
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"maps"
@@ -36,12 +38,16 @@ import (
 	resourcealpha "k8s.io/api/resource/v1alpha3"
 	resourcev1beta1 "k8s.io/api/resource/v1beta1"
 	resourcev1beta2 "k8s.io/api/resource/v1beta2"
+	schedulingv1alpha1 "k8s.io/api/scheduling/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
+	clientset "k8s.io/client-go/kubernetes"
+	schedulinglisters "k8s.io/client-go/listers/scheduling/v1alpha1"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/featuregate"
@@ -99,6 +105,9 @@ func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfig
 		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourcev1beta2.SchemeGroupVersion))
 		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourcev1beta1.SchemeGroupVersion))
 		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourcealpha.SchemeGroupVersion))
+	}
+	if enabledFeatures[features.GenericWorkload] {
+		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", schedulingv1alpha1.SchemeGroupVersion))
 	}
 	customFlags := []string{
 		// Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
@@ -813,4 +822,158 @@ func (sdc *schedulingDurationCollector) collect() []DataItem {
 		},
 		Unit: "s",
 	}}
+}
+
+// PodGroupLatencyCollector tracks the scheduling latency of pod groups
+// For PodGroup with gang requirement it calculates the time from the first
+// pod creation to the schedule of the pod meeting minCount requirement.
+// For PodGroup with basic policy it calculates the time from the first
+// pod creation to the schedule of the last pod.
+type podGroupLatencyCollector struct {
+	schedulerName  string
+	client         clientset.Interface
+	podInformer    coreinformers.PodInformer
+	workloadLister schedulinglisters.WorkloadLister
+	podGroupStats  map[string]*podGroupStat
+	mu             sync.Mutex
+}
+
+type podGroupStat struct {
+	firstCreated time.Time
+	minCount     int32
+	pods         []string
+}
+
+func newPodGroupLatencyCollector(podInformer coreinformers.PodInformer, workloadLister schedulinglisters.WorkloadLister) *podGroupLatencyCollector {
+	return &podGroupLatencyCollector{
+		podInformer:    podInformer,
+		workloadLister: workloadLister,
+		podGroupStats:  make(map[string]*podGroupStat),
+	}
+}
+
+func (c *podGroupLatencyCollector) init() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.podGroupStats = make(map[string]*podGroupStat)
+	return nil
+}
+
+func (c *podGroupLatencyCollector) run(tCtx ktesting.TContext) {
+	// The collector is based on informer cache events
+	handler := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			pod := obj.(*v1.Pod)
+			c.onPodAdd(pod)
+		},
+	}
+	h, err := c.podInformer.Informer().AddEventHandler(handler)
+	if err != nil {
+		tCtx.Fatalf("register pod event handler: %v", err)
+	}
+	tCtx.Logf("Started podGroupLatencyCollector")
+
+	tCtx.Cleanup(func() {
+		c.podInformer.Informer().RemoveEventHandler(h)
+	})
+}
+
+func (c *podGroupLatencyCollector) onPodAdd(pod *v1.Pod) {
+	if pod.Spec.WorkloadRef == nil {
+		return
+	}
+	podGroupKey := fmt.Sprintf("%s-%s-%s", pod.Spec.WorkloadRef.Name, pod.Spec.WorkloadRef.PodGroup, pod.Spec.WorkloadRef.PodGroupReplicaKey)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	stat, exists := c.podGroupStats[podGroupKey]
+	if !exists {
+		// Try to find minCount from workload
+		workload, err := c.workloadLister.Workloads(pod.Namespace).Get(pod.Spec.WorkloadRef.Name)
+		if err != nil {
+			klog.ErrorS(err, "Failed to get workload", "workload", pod.Spec.WorkloadRef.Name)
+			return
+		}
+		var minCount int32
+		for _, pg := range workload.Spec.PodGroups {
+			if pg.Name == pod.Spec.WorkloadRef.PodGroup {
+				if pg.Policy.Gang != nil {
+					minCount = pg.Policy.Gang.MinCount
+				}
+				break
+			}
+		}
+
+		stat = &podGroupStat{
+			firstCreated: pod.CreationTimestamp.Time,
+			minCount:     minCount,
+		}
+		c.podGroupStats[podGroupKey] = stat
+	}
+	c.podGroupStats[podGroupKey].pods = append(c.podGroupStats[podGroupKey].pods, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+	if pod.CreationTimestamp.Time.Before(stat.firstCreated) {
+		stat.firstCreated = pod.CreationTimestamp.Time
+	}
+	stat.pods = append(stat.pods, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+}
+
+func (c *podGroupLatencyCollector) collect() []DataItem {
+	podToScheduleTime, err := getPodScheduleTime(c.client, c.schedulerName)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get pod schedule time")
+		return []DataItem{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var items []DataItem
+	for key, stat := range c.podGroupStats {
+		times := []time.Time{}
+		for _, pod := range stat.pods {
+			if t, ok := podToScheduleTime[pod]; ok {
+				times = append(times, t)
+			} else {
+				klog.ErrorS(nil, "No schedule time for pod", "pod", pod)
+			}
+		}
+		sort.Slice(times, func(i, j int) bool {
+			return times[i].Before(times[j])
+		})
+		var lastScheduledTime time.Time
+		if stat.minCount == 0 {
+			lastScheduledTime = times[len(times)-1]
+		} else if len(times) < int(stat.minCount) {
+			klog.ErrorS(nil, "Scheduled less pods than expected for pod group key", key)
+		} else {
+			lastScheduledTime = times[stat.minCount-1]
+		}
+
+		latency := lastScheduledTime.Sub(stat.firstCreated).Milliseconds()
+		items = append(items, DataItem{
+			Labels: map[string]string{"Metric": "PodGroupSchedulingDuration", "PodGroupKey": key},
+			Data:   map[string]float64{"Duration": float64(latency)},
+			Unit:   "ms",
+		})
+	}
+	return items
+}
+
+func getPodScheduleTime(c clientset.Interface, schedulerName string) (map[string]time.Time, error) {
+	selector := fields.Set{
+		"involvedObject.kind": "Pod",
+		"source":              schedulerName,
+		"reason":              "Scheduled",
+	}.AsSelector().String()
+	schedEvents, err := c.CoreV1().Events(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{FieldSelector: selector})
+	if err != nil {
+		return nil, errors.New("Failed to list events")
+	}
+	podToScheduleTime := make(map[string]time.Time)
+
+	for _, event := range schedEvents.Items {
+		podName := fmt.Sprintf("%s/%s", event.InvolvedObject.Namespace, event.InvolvedObject.Name)
+		podToScheduleTime[podName] = event.EventTime.Time
+	}
+	return podToScheduleTime, nil
 }

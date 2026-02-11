@@ -30,7 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	schedulinglisters "k8s.io/client-go/listers/scheduling/v1alpha1"
 	testutils "k8s.io/kubernetes/test/utils"
 	"k8s.io/kubernetes/test/utils/ktesting"
 	"k8s.io/utils/ptr"
@@ -415,4 +417,261 @@ func createObjTemplateFile(t *testing.T, obj any) *string {
 		t.Fatalf("Unsupported object type for template file: %T", obj)
 	}
 	return &templateFile
+}
+
+// mockDataCollector always returns the same data items, to be used for mocking data collector in unit tests.
+type mockDataCollector struct {
+	dataItems []DataItem
+}
+
+// init does nothing.
+func (mc *mockDataCollector) init() error {
+	return nil
+}
+
+// run does nothing.
+func (mc *mockDataCollector) run(_ ktesting.TContext) {}
+
+// collect always returns DataItems defined in the collector.
+func (mc *mockDataCollector) collect() []DataItem {
+	return mc.dataItems
+}
+
+func TestMetricThreshold(t *testing.T) {
+	testCases := []struct {
+		name                                  string
+		thresholdValue                        float64
+		dataItems                             []DataItem
+		thresholdMetricSelector               *thresholdMetricSelector
+		expectCollectionFailure               bool
+		expectedDataItemsWithThresholdIndices []int
+		expectedThresholdName                 string
+	}{
+		{
+			name:           "value is above threshold, no error",
+			thresholdValue: 100,
+			dataItems: []DataItem{
+				{
+					Data: map[string]float64{
+						"Average": 150,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+					},
+				},
+			},
+			thresholdMetricSelector: &thresholdMetricSelector{
+				Name:       "throughput",
+				DataBucket: "Average",
+			},
+			expectedDataItemsWithThresholdIndices: []int{0},
+			expectedThresholdName:                 "AverageThreshold",
+		},
+		{
+			name:           "value is below threshold, expect error",
+			thresholdValue: 100,
+			dataItems: []DataItem{
+				{
+					Data: map[string]float64{
+						"Average": 70,
+						"Max":     90,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+					},
+				},
+			},
+			thresholdMetricSelector: &thresholdMetricSelector{
+				Name:       "throughput",
+				DataBucket: "Max",
+			},
+			expectCollectionFailure:               true,
+			expectedDataItemsWithThresholdIndices: []int{0},
+			expectedThresholdName:                 "MaxThreshold",
+		},
+		{
+			name:           "no error if the labels do not match",
+			thresholdValue: 100,
+			dataItems: []DataItem{
+				{
+					Data: map[string]float64{
+						"Average": 70,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value",
+					},
+				},
+			},
+			thresholdMetricSelector: &thresholdMetricSelector{
+				Name:       "throughput",
+				DataBucket: "Average",
+				Labels: map[string]string{
+					"label": "value2",
+				},
+			},
+			expectedDataItemsWithThresholdIndices: []int{},
+			expectedThresholdName:                 "AverageThreshold",
+		},
+		{
+			name:           "out of multiple data items only matching are selected",
+			thresholdValue: 100,
+			dataItems: []DataItem{
+				{
+					Data: map[string]float64{
+						"Average": 70,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value",
+					},
+				},
+				{
+					Data: map[string]float64{
+						"Average": 150,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value2",
+					},
+				},
+			},
+			thresholdMetricSelector: &thresholdMetricSelector{
+				Name:       "throughput",
+				DataBucket: "Average",
+				Labels: map[string]string{
+					"label": "value2",
+				},
+			},
+			expectedDataItemsWithThresholdIndices: []int{1},
+			expectedThresholdName:                 "AverageThreshold",
+		},
+		{
+			name:           "threshold value is added for all matching entries",
+			thresholdValue: 100,
+			dataItems: []DataItem{
+				{
+					Data: map[string]float64{
+						"Average": 130,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value",
+					},
+				},
+				{
+					Data: map[string]float64{
+						"Average": 150,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value2",
+					},
+				},
+			},
+			thresholdMetricSelector: &thresholdMetricSelector{
+				Name:       "throughput",
+				DataBucket: "Average",
+			},
+			expectedDataItemsWithThresholdIndices: []int{0, 1},
+			expectedThresholdName:                 "AverageThreshold",
+		},
+		{
+			name:           "threshold value is added for all matching entries even with error",
+			thresholdValue: 100,
+			dataItems: []DataItem{
+				{
+					Data: map[string]float64{
+						"Average": 70,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value",
+					},
+				},
+				{
+					Data: map[string]float64{
+						"Average": 80,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value2",
+					},
+				},
+				{
+					Data: map[string]float64{
+						"Average": 130,
+					},
+					Labels: map[string]string{
+						"Metric": "throughput",
+						"label":  "value3",
+					},
+				},
+			},
+			thresholdMetricSelector: &thresholdMetricSelector{
+				Name:       "throughput",
+				DataBucket: "Average",
+			},
+			expectCollectionFailure:               true,
+			expectedDataItemsWithThresholdIndices: []int{0, 1, 2},
+			expectedThresholdName:                 "AverageThreshold",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, tCtx := ktesting.NewTestContext(t)
+			var capturedErr error
+			capturingCtx, finalize := tCtx.WithError(&capturedErr)
+			defer finalize()
+
+			originalGetTestDataCollectors := getTestDataCollectors
+			defer func() { getTestDataCollectors = originalGetTestDataCollectors }()
+			getTestDataCollectors = func(_ coreinformers.PodInformer, _ schedulinglisters.WorkloadLister, _ string, _ []string, _ map[string]string, _ *metricsCollectorConfig, _ float64, _ []string) []testDataCollector {
+				return []testDataCollector{&mockDataCollector{dataItems: tc.dataItems}}
+			}
+
+			workload := &workload{
+				Name: "some/workload",
+				Threshold: thresholds{
+					valuesByTopic: map[string]float64{"example": tc.thresholdValue},
+				},
+				ThresholdMetricSelector: tc.thresholdMetricSelector,
+			}
+			exec := &WorkloadExecutor{
+				topicName:                    "example",
+				testCase:                     &testCase{},
+				tCtx:                         capturingCtx,
+				numPodsScheduledPerNamespace: make(map[string]int),
+				workload:                     workload,
+			}
+
+			start := &startCollectingMetricsOp{
+				Opcode:     startCollectingMetricsOpcode,
+				Name:       "test-collection",
+				Namespaces: []string{"test-namespaces"},
+			}
+			err := exec.runOp(start, 0)
+			if err != nil {
+				t.Fatalf("Failed to start metric collection")
+			}
+			stop := &stopCollectingMetricsOp{Opcode: stopCollectingMetricsOpcode}
+			err = exec.runOp(stop, 0)
+			if err != nil {
+				t.Fatalf("Failed to stop metric collection")
+			}
+
+			if tc.expectCollectionFailure != capturingCtx.Failed() {
+				t.Fatalf("expectCollectionFailure=%v but got %v", tc.expectCollectionFailure, capturingCtx.Failed())
+			}
+			for _, idx := range tc.expectedDataItemsWithThresholdIndices {
+				if idx >= len(exec.dataItems) {
+					t.Fatalf("expectedDataItemsWithThresholdIndex out of data items range")
+				}
+				if _, ok := exec.dataItems[idx].Data[tc.expectedThresholdName]; !ok {
+					t.Fatalf("expected data item at index=%d to have %s field", idx, tc.expectedThresholdName)
+				}
+			}
+		})
+	}
 }

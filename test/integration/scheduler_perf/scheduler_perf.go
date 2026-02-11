@@ -28,10 +28,8 @@ import (
 	"os"
 	"path"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -39,7 +37,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/version"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/component-base/featuregate"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-base/logs"
@@ -1065,59 +1062,7 @@ func checkEmptyInFlightEvents() error {
 	return nil
 }
 
-func startCollectingMetrics(tCtx ktesting.TContext, collectorWG *sync.WaitGroup, podInformer coreinformers.PodInformer, mcc *metricsCollectorConfig, throughputErrorMargin float64, opIndex int, name string, namespaces []string, labelSelector map[string]string) (ktesting.TContext, []testDataCollector, error) {
-	collectorCtx := tCtx.WithCancel()
-	workloadName := tCtx.Name()
 
-	// Clean up memory usage from the initial setup phase.
-	runtime.GC()
-
-	// The first part is the same for each workload, therefore we can strip it.
-	workloadName = workloadName[strings.Index(name, "/")+1:]
-	collectors := getTestDataCollectors(podInformer, fmt.Sprintf("%s/%s", workloadName, name), namespaces, labelSelector, mcc, throughputErrorMargin)
-	for _, collector := range collectors {
-		// Need loop-local variable for function below.
-		err := collector.init()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to initialize data collector: %w", err)
-		}
-		tCtx.TB().Cleanup(func() {
-			collectorCtx.Cancel("cleaning up")
-		})
-		collectorWG.Add(1)
-		go func() {
-			defer collectorWG.Done()
-			collector.run(collectorCtx)
-		}()
-	}
-	if b, ok := tCtx.TB().(*testing.B); ok {
-		b.ResetTimer()
-	}
-	tCtx.Log("Started metrics collection")
-	return collectorCtx, collectors, nil
-}
-
-func stopCollectingMetrics(tCtx ktesting.TContext, collectorCtx ktesting.TContext, collectorWG *sync.WaitGroup, threshold float64, tms thresholdMetricSelector, opIndex int, collectors []testDataCollector) ([]DataItem, error) {
-	if b, ok := tCtx.TB().(*testing.B); ok {
-		b.StopTimer()
-	}
-	if collectorCtx == nil {
-		return nil, fmt.Errorf("missing startCollectingMetrics operation before stopping")
-	}
-	collectorCtx.Cancel("collecting metrics, collector must stop first")
-	collectorWG.Wait()
-	var dataItems []DataItem
-	for _, collector := range collectors {
-		items := collector.collect()
-		dataItems = append(dataItems, items...)
-		err := applyThreshold(items, threshold, tms)
-		if err != nil {
-			tCtx.Errorf("op %d: %s", opIndex, err)
-		}
-	}
-	tCtx.Log("Stopped metrics collection")
-	return dataItems, nil
-}
 
 func runWorkload(tCtx ktesting.TContext, tc *testCase, w *workload, topicName string, scheduler *scheduler.Scheduler, informerFactory informers.SharedInformerFactory) ([]DataItem, error) {
 	b, benchmarking := tCtx.TB().(*testing.B)
@@ -1156,6 +1101,7 @@ func runWorkload(tCtx ktesting.TContext, tc *testCase, w *workload, topicName st
 		scheduler:                    scheduler,
 		numPodsScheduledPerNamespace: make(map[string]int),
 		podInformer:                  podInformer,
+		workloadLister:               informerFactory.Scheduling().V1alpha1().Workloads().Lister(),
 		throughputErrorMargin:        throughputErrorMargin,
 		testCase:                     tc,
 		workload:                     w,
@@ -1194,24 +1140,6 @@ func runWorkload(tCtx ktesting.TContext, tc *testCase, w *workload, topicName st
 	return executor.dataItems, nil
 }
 
-type testDataCollector interface {
-	init() error
-	run(tCtx ktesting.TContext)
-	collect() []DataItem
-}
-
-// var for mocking in tests.
-var getTestDataCollectors = func(podInformer coreinformers.PodInformer, name string, namespaces []string, labelSelector map[string]string, mcc *metricsCollectorConfig, throughputErrorMargin float64) []testDataCollector {
-	if mcc == nil {
-		mcc = &defaultMetricsCollectorConfig
-	}
-	return []testDataCollector{
-		newThroughputCollector(podInformer, map[string]string{"Name": name}, labelSelector, namespaces, throughputErrorMargin),
-		newMetricsCollector(mcc, map[string]string{"Name": name}),
-		newMemoryCollector(map[string]string{"Name": name}, 500*time.Millisecond),
-		newSchedulingDurationCollector(map[string]string{"Name": name}),
-	}
-}
 
 func getSpecFromFile(path *string, spec interface{}) error {
 	bytes, err := os.ReadFile(*path)
