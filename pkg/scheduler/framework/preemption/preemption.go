@@ -52,8 +52,8 @@ type Interface interface {
 	PodEligibleToPreemptOthers(ctx context.Context, pod *v1.Pod, nominatedNodeStatus *fwk.Status) (bool, string)
 	// SelectVictimsOnDomain finds minimum set of pods on the given domain that should be preempted in order to make enough room
 	// for "pods" from preemptor to be scheduled.
-	// Note that both `state` and `nodeInfo` are deep copied.
-	SelectVictimsOnDomain(ctx context.Context, state fwk.CycleState, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) ([]*v1.Pod, int, *fwk.Status)
+	// Note that both `preemptor` (with its state) and `nodeInfo` are deep copied.
+	SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) ([]*v1.Pod, int, *fwk.Status)
 	// OrderedScoreFuncs returns a list of ordered score functions to select preferable node where victims will be preempted.
 	// The ordered score functions will be processed one by one iff we find more than one node with the highest score.
 	// Default score functions will be processed if nil returned here for backwards-compatibility.
@@ -134,7 +134,7 @@ func buildPodGroupIndex(allNodes []fwk.NodeInfo) map[util.PodGroupKey][]fwk.PodI
 //
 //   - <non-nil PostFilterResult, Success>. It's the regular happy path
 //     and the non-empty nominatedNodeName will be applied to the preemptor pod.
-func (ev *Evaluator) Preempt(ctx context.Context, state fwk.CycleState, preemptor Preemptor, m fwk.NodeToStatusReader) (*fwk.PostFilterResult, *fwk.Status) {
+func (ev *Evaluator) Preempt(ctx context.Context, preemptor Preemptor, m fwk.NodeToStatusReader) (*fwk.PostFilterResult, *fwk.Status) {
 	logger := klog.FromContext(ctx)
 
 	if !preemptor.IsEligibleToPreemptOthers() {
@@ -175,9 +175,9 @@ func (ev *Evaluator) Preempt(ctx context.Context, state fwk.CycleState, preempto
 	}
 	if ev.enableWorkloadAwarePreemption {
 		ev.podGroupIndex = buildPodGroupIndex(allNodes)
-		candidates, nodeToStatusMap, err = ev.findCandidatesForWorkloadAwarePreemption(ctx, state, preemptor, allNodes)
+		candidates, nodeToStatusMap, err = ev.findCandidatesForWorkloadAwarePreemption(ctx, preemptor, allNodes)
 	} else {
-		candidates, nodeToStatusMap, err = ev.findCandidatesForPodPreemption(ctx, state, allNodes, preemptor, m)
+		candidates, nodeToStatusMap, err = ev.findCandidatesForPodPreemption(ctx, allNodes, preemptor, m)
 	}
 	if err != nil && len(candidates) == 0 {
 		return nil, fwk.AsStatus(err)
@@ -225,7 +225,7 @@ func (ev *Evaluator) Preempt(ctx context.Context, state fwk.CycleState, preempto
 	return framework.NewPostFilterResult(bestCandidate.Name(), bestCandidate.Victims().Pods), fwk.NewStatus(fwk.Success)
 }
 
-func (ev *Evaluator) findCandidatesForWorkloadAwarePreemption(ctx context.Context, state fwk.CycleState, preemptor Preemptor, allNodes []fwk.NodeInfo) ([]Candidate, *framework.NodeToStatus, error) {
+func (ev *Evaluator) findCandidatesForWorkloadAwarePreemption(ctx context.Context, preemptor Preemptor, allNodes []fwk.NodeInfo) ([]Candidate, *framework.NodeToStatus, error) {
 	pdbs, err := getPodDisruptionBudgets(ev.PdbLister)
 	if err != nil {
 		return nil, nil, err
@@ -241,12 +241,12 @@ func (ev *Evaluator) findCandidatesForWorkloadAwarePreemption(ctx context.Contex
 	}
 
 	offset, candidatesNum := ev.GetOffsetAndNumCandidates(int32(len(domains)))
-	return ev.DryRunPreemption(ctx, state, preemptor, domains, pdbs, offset, candidatesNum)
+	return ev.DryRunPreemption(ctx, preemptor, domains, pdbs, offset, candidatesNum)
 }
 
 // FindCandidates calculates a slice of preemption candidates.
 // Each candidate is executable to make the given <pod> schedulable.
-func (ev *Evaluator) findCandidatesForPodPreemption(ctx context.Context, state fwk.CycleState, allNodes []fwk.NodeInfo, preemptor Preemptor, m fwk.NodeToStatusReader) ([]Candidate, *framework.NodeToStatus, error) {
+func (ev *Evaluator) findCandidatesForPodPreemption(ctx context.Context, allNodes []fwk.NodeInfo, preemptor Preemptor, m fwk.NodeToStatusReader) ([]Candidate, *framework.NodeToStatus, error) {
 	logger := klog.FromContext(ctx)
 
 	potentialNodes, err := m.NodesForStatusCode(ev.Handler.SnapshotSharedLister().NodeInfos(), fwk.Unschedulable)
@@ -274,7 +274,7 @@ func (ev *Evaluator) findCandidatesForPodPreemption(ctx context.Context, state f
 	}
 
 	offset, candidatesNum := ev.GetOffsetAndNumCandidates(int32(len(domains)))
-	return ev.DryRunPreemption(ctx, state, preemptor, domains, pdbs, offset, candidatesNum)
+	return ev.DryRunPreemption(ctx, preemptor, domains, pdbs, offset, candidatesNum)
 }
 
 // callExtenders calls given <extenders> to select the list of feasible candidates.
@@ -487,7 +487,7 @@ func pickOneNodeForPreemption(logger klog.Logger, nodesToVictims map[string]*ext
 // The number of candidates depends on the constraints defined in the plugin's args. In the returned list of
 // candidates, ones that do not violate PDB are preferred over ones that do.
 // NOTE: This method is exported for easier testing in default preemption.
-func (ev *Evaluator) DryRunPreemption(ctx context.Context, state fwk.CycleState, preemptor Preemptor, domains []Domain,
+func (ev *Evaluator) DryRunPreemption(ctx context.Context, preemptor Preemptor, domains []Domain,
 	pdbs []*policy.PodDisruptionBudget, offset int32, candidatesNum int32) ([]Candidate, *framework.NodeToStatus, error) {
 
 	fh := ev.Handler
@@ -506,8 +506,8 @@ func (ev *Evaluator) DryRunPreemption(ctx context.Context, state fwk.CycleState,
 		domain := domains[(int(offset)+i)%len(domains)].Snapshot()
 		logger.V(5).Info("Check the potential domain for preemption", "domain", domain)
 
-		stateCopy := state.Clone()
-		pods, numPDBViolations, status := ev.SelectVictimsOnDomain(ctx, stateCopy, preemptor, domain, pdbs)
+		preemptorSnapshot := preemptor.Snapshot()
+		pods, numPDBViolations, status := ev.SelectVictimsOnDomain(ctx, preemptorSnapshot, domain, pdbs)
 
 		if status.IsSuccess() && len(pods) != 0 {
 			victims := extenderv1.Victims{

@@ -69,7 +69,7 @@ type FakePostFilterPlugin struct {
 	numViolatingVictim int
 }
 
-func (pl *FakePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, state fwk.CycleState, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
+func (pl *FakePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
 	for _, node := range domain.Nodes() {
 		victims = append(victims, node.GetPods()[0].GetPod())
 	}
@@ -94,7 +94,7 @@ func (pl *FakePostFilterPlugin) OrderedScoreFuncs(ctx context.Context, nodesToVi
 
 type FakePreemptionScorePostFilterPlugin struct{}
 
-func (pl *FakePreemptionScorePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, state fwk.CycleState, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
+func (pl *FakePreemptionScorePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
 	for _, node := range domain.Nodes() {
 		victims = append(victims, node.GetPods()[0].GetPod())
 	}
@@ -156,7 +156,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
 			preemptors: []Preemptor{
-				NewPodPreemptor(st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()),
+				NewPodPreemptor(st.MakePod().Name("p").UID("p").Priority(highPriority).Obj(), framework.NewCycleState()),
 			},
 			initPods: []*v1.Pod{
 				st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj(),
@@ -186,7 +186,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
 			preemptors: []Preemptor{
-				NewPodPreemptor(st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()),
+				NewPodPreemptor(st.MakePod().Name("p").UID("p").Priority(highPriority).Obj(), framework.NewCycleState()),
 			},
 			initPods: []*v1.Pod{
 				st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj(),
@@ -365,14 +365,13 @@ func TestDryRunPreemption(t *testing.T) {
 			fakePostPlugin := &FakePostFilterPlugin{numViolatingVictim: tt.numViolatingVictim}
 
 			for cycle, preemptor := range tt.preemptors {
-				state := framework.NewCycleState()
 				pe := Evaluator{
 					PluginName:                    "FakePostFilter",
 					Handler:                       fwk,
 					Interface:                     fakePostPlugin,
 					enableWorkloadAwarePreemption: tt.workloadAwarePreemption,
 				}
-				got, _, _ := pe.DryRunPreemption(ctx, state, preemptor, NewDomainsForTest(pe, preemptor, nodeInfos, tt.workloadAwarePreemption), nil, 0, int32(len(nodeInfos)))
+				got, _, _ := pe.DryRunPreemption(ctx, preemptor, NewDomainsForTest(pe, preemptor, nodeInfos, tt.workloadAwarePreemption), nil, 0, int32(len(nodeInfos)))
 				// Sort the values (inner victims) and the candidate itself (by its NominatedNodeName).
 				for i := range got {
 					victims := got[i].Victims().Pods
@@ -405,7 +404,8 @@ func TestSelectCandidate(t *testing.T) {
 			nodeNames: []string{"node1", "node2", "node3"},
 			preemptors: []Preemptor{
 				NewPodPreemptor(
-					st.MakePod().Name("p").UID("p").Priority(highPriority).Req(veryLargeRes).Obj()),
+					st.MakePod().Name("p").UID("p").Priority(highPriority).Req(veryLargeRes).Obj(),
+					framework.NewCycleState()),
 			},
 			initPods: []*v1.Pod{
 				st.MakePod().Name("p1.1").UID("p1.1").Node("node1").Priority(midPriority).Containers([]v1.Container{
@@ -508,14 +508,13 @@ func TestSelectCandidate(t *testing.T) {
 			fakePreemptionScorePostFilterPlugin := &FakePreemptionScorePostFilterPlugin{}
 
 			for _, preemptor := range tt.preemptors {
-				state := framework.NewCycleState()
 				pe := Evaluator{
 					PluginName:                    "FakePreemptionScorePostFilter",
 					Handler:                       fwk,
 					Interface:                     fakePreemptionScorePostFilterPlugin,
 					enableWorkloadAwarePreemption: tt.workloadAwarePreemption,
 				}
-				candidates, _, _ := pe.DryRunPreemption(ctx, state, preemptor, NewDomainsForTest(pe, preemptor, nodeInfos, tt.workloadAwarePreemption), nil, 0, int32(len(nodeInfos)))
+				candidates, _, _ := pe.DryRunPreemption(ctx, preemptor, NewDomainsForTest(pe, preemptor, nodeInfos, tt.workloadAwarePreemption), nil, 0, int32(len(nodeInfos)))
 				s := pe.SelectCandidate(ctx, candidates)
 				if s == nil || len(s.Name()) == 0 {
 					t.Errorf("expect any node in %v, but no candidate selected", tt.expected)
@@ -627,7 +626,7 @@ func TestCallExtenders(t *testing.T) {
 		singlePreemptor      = NewPodPreemptor(st.MakePod().Name("preemptor").UID("preemptor").
 					SchedulerName(defaultSchedulerName).Priority(highPriority).
 					Containers([]v1.Container{st.MakeContainer().Name("container1").Obj()}).
-					Obj())
+					Obj(), framework.NewCycleState())
 		victim = st.MakePod().Name("victim").UID("victim").
 			Node(node1Name).SchedulerName(defaultSchedulerName).Priority(midPriority).
 			Containers([]v1.Container{st.MakeContainer().Name("container1").Obj()}).

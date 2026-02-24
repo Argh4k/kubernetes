@@ -79,12 +79,21 @@ func newExecutor(fh fwk.Handle) *Executor {
 
 		representative := preemptor.GetRepresentativePod()
 		skipAPICall := false
+		eventMessage := fmt.Sprintf("Preempted by pod %v on domain %v", representative.UID, c.Name())
 		// If the victim is a WaitingPod, try to preempt it without a delete call (victim will go back to backoff queue).
 		// Otherwise we should delete the victim.
 		if waitingPod := e.fh.GetWaitingPod(victim.UID); waitingPod != nil {
 			if waitingPod.Preempt(pluginName, "preempted") {
 				logger.V(2).Info("Preemptor preempted a waiting pod", "preemptor", klog.KObj(preemptor), "waitingPod", klog.KObj(victim), "domain", c.Name())
 				skipAPICall = true
+			}
+		} else if podInPreBind := e.fh.GetPodInPreBind(victim.UID); podInPreBind != nil {
+			// If the victim is in the preBind cancel the binding process.
+			if podInPreBind.CancelPod(fmt.Sprintf("preempted by %s", pluginName)) {
+				logger.V(2).Info("Preemptor pod rejected a pod in preBind", "preemptor", klog.KObj(preemptor), "podInPreBind", klog.KObj(victim), "node", c.Name())
+				skipAPICall = true
+			} else {
+				logger.V(5).Info("Failed to reject a pod in preBind, falling back to deletion via api call", "preemptor", klog.KObj(preemptor), "podInPreBind", klog.KObj(victim), "node", c.Name())
 			}
 		}
 		if !skipAPICall {
@@ -107,7 +116,7 @@ func newExecutor(fh fwk.Handle) *Executor {
 						logger.Error(err, "Could not add DisruptionTarget condition due to preemption", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim))
 						return err
 					}
-					logger.V(2).Info("Victim Pod is already deleted", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "node", c.Name())
+					logger.V(2).Info("Victim Pod is already deleted", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "domain", c.Name())
 					return nil
 				}
 			}
@@ -116,16 +125,18 @@ func newExecutor(fh fwk.Handle) *Executor {
 					logger.Error(err, "Tried to preempted pod", "pod", klog.KObj(victim), "preemptor", klog.KObj(preemptor))
 					return err
 				}
-				logger.V(2).Info("Victim Pod is already deleted", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "node", c.Name())
+				logger.V(2).Info("Victim Pod is already deleted", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "domain", c.Name())
 				return nil
 			}
-			logger.V(2).Info("Preemptor preempted victim Pod", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "node", c.Name())
+			logger.V(2).Info("Preemptor preempted victim Pod", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "domain", c.Name())
+		} else {
+			eventMessage += " (in kube-scheduler memory)."
 		}
 
 		// TODO: Refactor 'representative' to be a runtime.Object that can handle either a Pod or a PodGroup.
 		// This change is deferred until the snapshotting feature is introduced, which will provide
 		// a consistent representation of PodGroups during the scheduling cycle.
-		fh.EventRecorder().Eventf(victim, representative, v1.EventTypeNormal, "Preempted", "Preempting", "Preempted by pod %v on node %v", representative.UID, c.Name())
+		fh.EventRecorder().Eventf(victim, representative, v1.EventTypeNormal, "Preempted", "Preempting", eventMessage)
 
 		return nil
 	}

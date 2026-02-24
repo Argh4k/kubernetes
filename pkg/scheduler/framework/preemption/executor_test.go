@@ -47,6 +47,7 @@ import (
 	apidispatcher "k8s.io/kubernetes/pkg/scheduler/backend/api_dispatcher"
 	internalcache "k8s.io/kubernetes/pkg/scheduler/backend/cache"
 	internalqueue "k8s.io/kubernetes/pkg/scheduler/backend/queue"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 	apicalls "k8s.io/kubernetes/pkg/scheduler/framework/api_calls"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort"
@@ -282,7 +283,7 @@ func TestPrepareCandidate(t *testing.T) {
 				Containers([]v1.Container{st.MakeContainer().Name("container1").Obj()}).
 				Obj()
 
-		singlePreemptor = NewPodPreemptor(podPreemptor1)
+		singlePreemptor = NewPodPreemptor(podPreemptor1, framework.NewCycleState())
 
 		errDeletePodFailed   = errors.New("delete pod failed")
 		errPatchStatusFailed = errors.New("patch pod status failed")
@@ -305,7 +306,7 @@ func TestPrepareCandidate(t *testing.T) {
 	tests := []struct {
 		name      string
 		nodeNames []string
-		candidate *candidate
+		candidate Candidate
 		preemptor Preemptor
 		testPods  []*v1.Pod
 		// expectedDeletedPod is the pod name that is expected to be deleted.
@@ -599,6 +600,7 @@ func TestPrepareCandidate(t *testing.T) {
 						frameworkruntime.WithLogger(logger),
 						frameworkruntime.WithInformerFactory(informerFactory),
 						frameworkruntime.WithWaitingPods(frameworkruntime.NewWaitingPodsMap()),
+						frameworkruntime.WithPodsInPreBind(frameworkruntime.NewPodsInPreBindMap()),
 						frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(tt.testPods, nodes)),
 						frameworkruntime.WithPodNominator(nominator),
 						frameworkruntime.WithEventRecorder(eventBroadcaster.NewRecorder(scheme.Scheme, "test-scheduler")),
@@ -737,7 +739,7 @@ func TestPrepareCandidateAsyncSetsPreemptingSets(t *testing.T) {
 				SchedulerName(defaultSchedulerName).Priority(highPriority).
 				Containers([]v1.Container{st.MakeContainer().Name("container1").Obj()}).
 				Obj()
-		singlePreemptor   = NewPodPreemptor(podPreemptor)
+		singlePreemptor   = NewPodPreemptor(podPreemptor, framework.NewCycleState())
 		workloadPreemptor = newPodGroupPreemptor(highPriority,
 			[]*v1.Pod{
 				st.MakePod().Name("preemptor1").UID("preemptor1").
@@ -762,7 +764,7 @@ func TestPrepareCandidateAsyncSetsPreemptingSets(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		candidate  *candidate
+		candidate  Candidate
 		lastVictim *v1.Pod
 		preemptor  Preemptor
 	}{
@@ -858,6 +860,7 @@ func TestPrepareCandidateAsyncSetsPreemptingSets(t *testing.T) {
 					frameworkruntime.WithLogger(logger),
 					frameworkruntime.WithInformerFactory(informerFactory),
 					frameworkruntime.WithWaitingPods(frameworkruntime.NewWaitingPodsMap()),
+					frameworkruntime.WithPodsInPreBind(frameworkruntime.NewPodsInPreBindMap()),
 					frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(testPods, nodes)),
 					frameworkruntime.WithEventRecorder(eventBroadcaster.NewRecorder(scheme.Scheme, "test-scheduler")),
 					frameworkruntime.WithPodNominator(internalqueue.NewSchedulingQueue(nil, informerFactory)),
@@ -1078,7 +1081,7 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 			if tt.customPreemptor != nil {
 				currentPreemptor = tt.customPreemptor
 			} else {
-				currentPreemptor = NewPodPreemptor(defaultPreemptorPod)
+				currentPreemptor = NewPodPreemptor(defaultPreemptorPod, framework.NewCycleState())
 			}
 
 			candidate := &candidate{
@@ -1140,6 +1143,7 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 				frameworkruntime.WithEventRecorder(eventBroadcaster.NewRecorder(scheme.Scheme, "test-scheduler")),
 				frameworkruntime.WithPodActivator(fakeActivator),
 				frameworkruntime.WithWaitingPods(frameworkruntime.NewWaitingPodsMap()),
+				frameworkruntime.WithPodsInPreBind(frameworkruntime.NewPodsInPreBindMap()),
 				frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(snapshotPods, []*v1.Node{st.MakeNode().Name(node1Name).Obj()})),
 			)
 			if err != nil {

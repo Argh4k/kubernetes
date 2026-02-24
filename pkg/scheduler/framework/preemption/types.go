@@ -64,6 +64,15 @@ type Preemptor interface {
 	// in contexts that require a single v1.Pod object (such as event recording, logging,
 	// or legacy utility functions).
 	GetRepresentativePod() *v1.Pod
+
+	// CycleStates returns the CycleState for each member Pod.
+	// The slice index corresponds to the index in Members().
+	CycleStates() []fwk.CycleState
+
+	// Snapshot creates a copy of the Preemptor with deep-copied CycleStates.
+	// This is used for dry-run simulations where we need to mutate the state
+	// without affecting the original preemption context.
+	Snapshot() Preemptor
 }
 
 type preemptor struct {
@@ -72,14 +81,16 @@ type preemptor struct {
 	pods             []*v1.Pod
 	preemptionPolicy *v1.PreemptionPolicy
 	isPodGroup       bool
+	states           []fwk.CycleState
 }
 
-func NewPodPreemptor(p *v1.Pod) Preemptor {
+func NewPodPreemptor(p *v1.Pod, state fwk.CycleState) Preemptor {
 	return &preemptor{
 		priority:         corev1helpers.PodPriority(p),
 		pods:             []*v1.Pod{p},
 		preemptionPolicy: p.Spec.PreemptionPolicy,
 		isPodGroup:       false,
+		states:           []fwk.CycleState{state},
 	}
 }
 
@@ -93,6 +104,25 @@ func (p *preemptor) IsPodGroup() bool {
 
 func (p *preemptor) Members() []*v1.Pod {
 	return p.pods
+}
+
+func (p *preemptor) CycleStates() []fwk.CycleState {
+	return p.states
+}
+
+func (p *preemptor) Snapshot() Preemptor {
+	newStates := make([]fwk.CycleState, len(p.states))
+	for i, state := range p.states {
+		newStates[i] = state.Clone()
+	}
+
+	return &preemptor{
+		priority:         p.priority,
+		pods:             p.pods,
+		preemptionPolicy: p.preemptionPolicy,
+		isPodGroup:       p.isPodGroup,
+		states:           newStates,
+	}
 }
 
 func (p *preemptor) IsEligibleToPreemptOthers() bool {
