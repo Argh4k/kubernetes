@@ -606,7 +606,7 @@ func TestPrepareCandidate(t *testing.T) {
 						fwk.SetAPICacher(apicache.New(nil, cache))
 					}
 
-					executor := newExecutor(fwk)
+					executor := NewExecutor(fwk, false)
 
 					if asyncPreemptionEnabled {
 						executor.prepareCandidateAsync(tt.candidate, tt.preemptor, "test-plugin")
@@ -833,7 +833,7 @@ func TestPrepareCandidateAsyncSetsPreemptingSets(t *testing.T) {
 					fwk.SetAPICacher(apicache.New(nil, cache))
 				}
 
-				executor := newExecutor(fwk)
+				executor := NewExecutor(fwk, false)
 				// preemptPodCallsCounter helps verify if the last victim pod gets preempted after other victims.
 				preemptPodCallsCounter := 0
 				preemptFunc := executor.PreemptPod
@@ -1066,7 +1066,7 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 			informerFactory.Start(ctx.Done())
 			informerFactory.WaitForCacheSync(ctx.Done())
 
-			executor := newExecutor(fwk)
+			executor := NewExecutor(fwk, false)
 
 			// Run the actual preemption.
 			executor.prepareCandidateAsync(candidate, preemptor, "test-plugin")
@@ -1271,7 +1271,7 @@ func TestPreemptPod(t *testing.T) {
 					t.Fatalf("Failed to add a pod to waiting list")
 				}
 			}
-			pe := NewEvaluator("FakePreemptionScorePostFilter", fwk, &FakePreemptionScorePostFilterPlugin{}, false)
+			pe := NewEvaluator("FakePreemptionScorePostFilter", fwk, &FakePreemptionScorePostFilterPlugin{}, NewExecutor(fwk, false))
 
 			err = pe.PreemptPod(ctx, &candidate{}, preemptorPod, victimPod, "test-plugin")
 			if err != nil {

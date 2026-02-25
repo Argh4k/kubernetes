@@ -47,6 +47,9 @@ type CycleState interface {
 	// should be recorded.
 	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
 	ShouldRecordPluginMetrics() bool
+	// SkipPreemptionActuation returns whether preemption actuation should be skipped in this cycle.
+	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
+	SkipPreemptionActuation() bool
 	// GetSkipFilterPlugins returns plugins that will be skipped in the Filter extension point.
 	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
 	GetSkipFilterPlugins() sets.Set[string]

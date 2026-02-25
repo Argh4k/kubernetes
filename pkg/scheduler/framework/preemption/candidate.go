@@ -20,16 +20,17 @@ import (
 	"sync/atomic"
 
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	fwk "k8s.io/kube-scheduler/framework"
 )
 
-// Candidate represents a nominated node on which the preemptor can be scheduled,
-// along with the list of victims that should be evicted for the preemptor to fit the node.
-type Candidate interface {
-	// Victims wraps a list of to-be-preempted Pods and the number of PDB violation.
-	Victims() *extenderv1.Victims
-	// Name returns the target node name where the preemptor gets nominated to run.
-	Name() string
-}
+// // Candidate represents a nominated node on which the preemptor can be scheduled,
+// // along with the list of victims that should be evicted for the preemptor to fit the node.
+// type Candidate interface {
+// 	// Victims wraps a list of to-be-preempted Pods and the number of PDB violation.
+// 	Victims() *extenderv1.Victims
+// 	// Name returns the target node name where the preemptor gets nominated to run.
+// 	Name() string
+// }
 
 type candidate struct {
 	victims *extenderv1.Victims
@@ -46,14 +47,22 @@ func (s *candidate) Name() string {
 	return s.name
 }
 
+// NewCandidate creates a new preemption candidate from the given node name and victims list.
+func NewCandidate(name string, victims *extenderv1.Victims) fwk.PreemptionCandidate {
+	return &candidate{
+		name:    name,
+		victims: victims,
+	}
+}
+
 type candidateList struct {
 	idx   int32
-	items []Candidate
+	items []fwk.PreemptionCandidate
 }
 
 // newCandidateList creates a new candidate list with the given capacity.
 func newCandidateList(capacity int32) *candidateList {
-	return &candidateList{idx: -1, items: make([]Candidate, capacity)}
+	return &candidateList{idx: -1, items: make([]fwk.PreemptionCandidate, capacity)}
 }
 
 // add adds a new candidate to the internal array atomically.
@@ -79,6 +88,6 @@ func (cl *candidateList) size() int32 {
 
 // get returns the internal candidate array. This function is NOT atomic and
 // assumes that all add() operations have been completed.
-func (cl *candidateList) get() []Candidate {
+func (cl *candidateList) get() []fwk.PreemptionCandidate {
 	return cl.items[:cl.size()]
 }

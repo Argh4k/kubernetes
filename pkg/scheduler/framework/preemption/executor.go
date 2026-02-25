@@ -59,21 +59,25 @@ type Executor struct {
 	// with a condition that the preemptor is waiting for one last victim to be preempted. This is used together with `preempting`
 	// to prevent the pods from entering the scheduling cycle while waiting for preemption to complete.
 	lastVictimsPendingPreemption map[types.UID]pendingVictim
+
+	enableAsyncPreemption bool
+
 	// PreemptPod is a function that actually makes API calls to preempt a specific Pod.
 	// This is exposed to be replaced during tests.
-	PreemptPod func(ctx context.Context, c Candidate, preemptor, victim *v1.Pod, pluginName string) error
+	PreemptPod func(ctx context.Context, c fwk.PreemptionCandidate, preemptor, victim *v1.Pod, pluginName string) error
 }
 
-// newExecutor creates a new preemption executor.
-func newExecutor(fh fwk.Handle) *Executor {
+// NewExecutor creates a new preemption executor.
+func NewExecutor(fh fwk.Handle, enableAsyncPreemption bool) *Executor {
 	e := &Executor{
 		fh:                           fh,
 		podLister:                    fh.SharedInformerFactory().Core().V1().Pods().Lister(),
 		preempting:                   sets.New[types.UID](),
 		lastVictimsPendingPreemption: make(map[types.UID]pendingVictim),
+		enableAsyncPreemption:        enableAsyncPreemption,
 	}
 
-	e.PreemptPod = func(ctx context.Context, c Candidate, preemptor, victim *v1.Pod, pluginName string) error {
+	e.PreemptPod = func(ctx context.Context, c fwk.PreemptionCandidate, preemptor, victim *v1.Pod, pluginName string) error {
 		logger := klog.FromContext(ctx)
 
 		skipAPICall := false
@@ -135,6 +139,20 @@ func newExecutor(fh fwk.Handle) *Executor {
 	return e
 }
 
+// ActuateCandidate performs the preparation work before nominating the selected candidate.
+// It bypasses the eligibility and dry-run steps of the standard Preempt routine.
+func (e *Executor) ActuateCandidate(ctx context.Context, bestCandidate fwk.PreemptionCandidate, pod *v1.Pod, pluginName string) *fwk.Status {
+	if e.enableAsyncPreemption {
+		e.prepareCandidateAsync(bestCandidate, pod, pluginName)
+	} else {
+		if status := e.prepareCandidate(ctx, bestCandidate, pod, pluginName); !status.IsSuccess() {
+			return status
+		}
+	}
+
+	return fwk.NewStatus(fwk.Success)
+}
+
 // prepareCandidateAsync triggers a goroutine for some preparation work:
 // - Evict the victim pods
 // - Reject the victim pods if they are in waitingPod map
@@ -142,7 +160,7 @@ func newExecutor(fh fwk.Handle) *Executor {
 // The Pod won't be retried until the goroutine triggered here completes.
 //
 // See http://kep.k8s.io/4832 for how the async preemption works.
-func (e *Executor) prepareCandidateAsync(c Candidate, pod *v1.Pod, pluginName string) {
+func (e *Executor) prepareCandidateAsync(c fwk.PreemptionCandidate, pod *v1.Pod, pluginName string) {
 	// Intentionally create a new context, not using a ctx from the scheduling cycle, to create ctx,
 	// because this process could continue even after this scheduling cycle finishes.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -250,7 +268,7 @@ func (e *Executor) prepareCandidateAsync(c Candidate, pod *v1.Pod, pluginName st
 // - Evict the victim pods
 // - Reject the victim pods if they are in waitingPod map
 // - Clear the low-priority pods' nominatedNodeName status if needed
-func (e *Executor) prepareCandidate(ctx context.Context, c Candidate, pod *v1.Pod, pluginName string) *fwk.Status {
+func (e *Executor) prepareCandidate(ctx context.Context, c fwk.PreemptionCandidate, pod *v1.Pod, pluginName string) *fwk.Status {
 	metrics.PreemptionVictims.Observe(float64(len(c.Victims().Pods)))
 
 	fh := e.fh

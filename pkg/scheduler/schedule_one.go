@@ -293,11 +293,12 @@ func (sched *Scheduler) schedulingAlgorithm(
 			logger.V(5).Info("Status after running PostFilter plugins for pod", "pod", klog.KObj(pod), "status", msg)
 		}
 
-		var nominatingInfo *fwk.NominatingInfo
+		schedRes := ScheduleResult{}
 		if result != nil {
-			nominatingInfo = result.NominatingInfo
+			schedRes.nominatingInfo = result.NominatingInfo
+			schedRes.victims = result.Victims
 		}
-		return ScheduleResult{nominatingInfo: nominatingInfo}, fwk.NewStatus(fwk.Unschedulable).WithError(err)
+		return schedRes, fwk.NewStatus(fwk.Unschedulable).WithError(err)
 	}
 	return scheduleResult, nil
 }

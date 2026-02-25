@@ -228,19 +228,10 @@ func (s *Snapshot) AssumePod(podInfo *framework.PodInfo) error {
 	return nil
 }
 
-// ForgetPod forgets a given pod from the snapshot.
+// RemovePod removes a given pod from the snapshot.
 // This function is not thread safe, so it should be executed when no other routines can write/read from the snapshot.
-func (s *Snapshot) ForgetPod(logger klog.Logger, pod *v1.Pod) error {
-	key, err := framework.GetPodKey(pod)
-	if err != nil {
-		return err
-	}
-	assumedPod, ok := s.assumedPods[key]
-	if !ok {
-		return fmt.Errorf("assumed pod %q not found in the snapshot", key)
-	}
-	delete(s.assumedPods, key)
-	nodeName := assumedPod.Spec.NodeName
+func (s *Snapshot) RemovePod(logger klog.Logger, pod *v1.Pod) error {
+	nodeName := pod.Spec.NodeName
 	if nodeInfo, ok := s.nodeInfoMap[nodeName]; ok {
 		// Calling RemovePod increases the Generation number of the nodeInfo.
 		// Since this operation only affects the snapshot,
@@ -256,6 +247,21 @@ func (s *Snapshot) ForgetPod(logger klog.Logger, pod *v1.Pod) error {
 		}
 	}
 	return nil
+}
+
+// ForgetPod forgets a given pod from the snapshot.
+// This function is not thread safe, so it should be executed when no other routines can write/read from the snapshot.
+func (s *Snapshot) ForgetPod(logger klog.Logger, pod *v1.Pod) error {
+	key, err := framework.GetPodKey(pod)
+	if err != nil {
+		return err
+	}
+	assumedPod, ok := s.assumedPods[key]
+	if !ok {
+		return fmt.Errorf("assumed pod %q not found in the snapshot", key)
+	}
+	delete(s.assumedPods, key)
+	return s.RemovePod(logger, assumedPod)
 }
 
 // forgetAllAssumedPods forgets all assumed pods from the snapshot.

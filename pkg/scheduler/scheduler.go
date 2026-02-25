@@ -160,6 +160,8 @@ type ScheduleResult struct {
 	FeasibleNodes int
 	// The nominating info for scheduling cycle.
 	nominatingInfo *fwk.NominatingInfo
+	// Victims is a list of pods to be removed as a part of this scheduling cycle.
+	victims []*v1.Pod
 }
 
 // WithComponentConfigVersion sets the component config version to the

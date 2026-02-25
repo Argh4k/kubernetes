@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
 // Code is the Status code/type which is returned from plugins.
@@ -806,6 +807,9 @@ type Handle interface {
 
 	// Sign a pod.
 	SignPod(ctx context.Context, pod *v1.Pod, recordPluginStats bool) PodSignature
+
+	// PreemptionExecutor returns the PreemptionExecutor.
+	PreemptionExecutor() PreemptionExecutor
 }
 
 // Parallelizer helps run scheduling operations in parallel chunks where possible, to improve performance and CPU utilization.
@@ -865,4 +869,21 @@ type PluginsRunner interface {
 	// PreFilter plugins. It returns directly if any of the plugins return any
 	// status other than Success.
 	RunPreFilterExtensionRemovePod(ctx context.Context, state CycleState, podToSchedule *v1.Pod, podInfoToRemove PodInfo, nodeInfo NodeInfo) *Status
+}
+
+// Candidate represents a nominated node on which the preemptor can be scheduled,
+// along with the list of victims that should be evicted for the preemptor to fit the node.
+type PreemptionCandidate interface {
+	// Victims wraps a list of to-be-preempted Pods and the number of PDB violation.
+	Victims() *extenderv1.Victims
+	// Name returns the target node name where the preemptor gets nominated to run.
+	Name() string
+}
+
+type PreemptionExecutor interface {
+	// ActuateCandidate actuates the candidate to preempt the victim pods.
+	ActuateCandidate(ctx context.Context, candidate PreemptionCandidate, preemptorPod *v1.Pod, operation string) *Status
+
+	// IsPodRunningPreemption returns true if the pod is currently triggering preemption asynchronously.
+	IsPodRunningPreemption(podUID types.UID) bool
 }

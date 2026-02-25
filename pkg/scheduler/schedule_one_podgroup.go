@@ -27,8 +27,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
+	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 	"k8s.io/utils/ptr"
 )
@@ -185,6 +187,9 @@ func (sched *Scheduler) initPodSchedulingContext(ctx context.Context, pod *v1.Po
 
 	// Synchronously attempt to find a fit for the pod.
 	state := framework.NewCycleState()
+
+	// TODO(Argh4k): Do we want to have this behind feature flag?
+	state.SetSkipPreemptionActuation(true)
 	// For the sake of performance, scheduler does not measure and export the scheduler_plugin_execution_duration metric
 	// for every plugin execution in each scheduling cycle. Instead it samples a portion of scheduling cycles - percentage
 	// determined by pluginMetricsSamplePercent. The line below helps to randomly pick appropriate scheduling cycles.
@@ -232,6 +237,8 @@ type algorithmResult struct {
 	schedulingDuration time.Duration
 	// requiresPreemption determines whether this pod requires a preemption to proceed or not.
 	requiresPreemption bool
+	// victims is a list of pods that are meant to be preempted when requiresPreemption is true.
+	victims []*v1.Pod
 	// status is a scheduling algorithm status.
 	status *fwk.Status
 	// permitStatus is a status of the permit check.
@@ -304,6 +311,37 @@ func (sched *Scheduler) podGroupSchedulingDefaultAlgorithm(ctx context.Context, 
 		}
 	}
 
+	if result.status == podGroupWaitingOnPreemption {
+		var candidates []fwk.PreemptionCandidate
+		var pCtx context.Context
+		var preemptorPod *v1.Pod
+
+		for i, podResult := range result.podResults {
+			if !podResult.requiresPreemption {
+				continue
+			}
+			if preemptorPod == nil {
+				preemptorPod = podGroupInfo.QueuedPodInfos[i].Pod
+				pCtx = ctx
+			}
+			candidates = append(candidates, preemption.NewCandidate(podResult.scheduleResult.SuggestedHost, &extenderv1.Victims{Pods: podResult.victims}))
+		}
+
+		if len(candidates) > 0 {
+			// Actuate preemption by calling the PreemptionExecutor exposed by the Framework.
+			executor := schedFwk.PreemptionExecutor()
+			
+			for _, cand := range candidates {
+				status := executor.ActuateCandidate(pCtx, cand, preemptorPod, "podgroup-preemption")
+				if !status.IsSuccess() {
+					logger.V(4).Info("Actuating preemptions failed for pod group", "podGroup", klog.KObj(podGroupInfo), "err", status.AsError())
+					// Wait, if it's not success, should we break or continue?
+					// The previous logic just returned nil and continued for the next candidates.
+				}
+			}
+		}
+	}
+
 	return result
 }
 
@@ -328,6 +366,16 @@ func (sched *Scheduler) podGroupPodSchedulingAlgorithm(ctx context.Context, sche
 			// Set SuggestedHost to NominatedNodeName to handle the pod similarly to one that is feasible.
 			scheduleResult.SuggestedHost = scheduleResult.nominatingInfo.NominatedNodeName
 			requiresPreemption = true
+
+			// Remove victims from the node info snapshot so that subsequent pods
+			// in the pod group don't see them as occupying resources.
+			for _, pInfo := range scheduleResult.victims {
+				err := sched.nodeInfoSnapshot.RemovePod(logger, pInfo)
+				if err != nil {
+					utilruntime.HandleErrorWithContext(ctx, err, "RemovePod failed for victim")
+				}
+			}
+
 		} else {
 			// In case of pod being just unschedulable or having an error, just return now.
 			return algorithmResult{
@@ -352,6 +400,18 @@ func (sched *Scheduler) podGroupPodSchedulingAlgorithm(ctx context.Context, sche
 		err := sched.unreserveAndForget(ctx, podCtx.state, schedFwk, assumedPodInfo, scheduleResult.SuggestedHost)
 		if err != nil {
 			utilruntime.HandleErrorWithContext(ctx, err, "ForgetPod failed")
+		}
+		// Put victims back into the NodeInfoSnapshot so they aren't lost from the node
+		for _, pInfo := range scheduleResult.victims {
+			nodeInfo, err := sched.nodeInfoSnapshot.Get(pInfo.Spec.NodeName)
+			if err == nil {
+				if ni, ok := nodeInfo.(*framework.NodeInfo); ok {
+					podInfo, _ := framework.NewPodInfo(pInfo)
+					oldGeneration := ni.Generation
+					ni.AddPodInfo(podInfo)
+					ni.Generation = oldGeneration
+				}
+			}
 		}
 	}
 
@@ -385,6 +445,7 @@ func (sched *Scheduler) podGroupPodSchedulingAlgorithm(ctx context.Context, sche
 		status:             status,
 		permitStatus:       permitStatus,
 		requiresPreemption: requiresPreemption,
+		victims:            scheduleResult.victims,
 	}, revertFn
 }
 

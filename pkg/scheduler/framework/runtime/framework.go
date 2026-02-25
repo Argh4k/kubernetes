@@ -44,6 +44,7 @@ import (
 	apidispatcher "k8s.io/kubernetes/pkg/scheduler/backend/api_dispatcher"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
+	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 )
 
@@ -85,6 +86,8 @@ type frameworkImpl struct {
 	sharedDRAManager fwk.SharedDRAManager
 	workloadManager  fwk.WorkloadManager
 	logger           klog.Logger
+	preemptionExecutor *preemption.Executor
+
 
 	sharedCSIManager fwk.CSIManager
 
@@ -158,6 +161,7 @@ type frameworkOptions struct {
 	apiDispatcher          *apidispatcher.APIDispatcher
 	workloadManager        fwk.WorkloadManager
 	logger                 *klog.Logger
+	preemptionExecutor     *preemption.Executor
 }
 
 // Option for the frameworkImpl.
@@ -263,6 +267,13 @@ func WithWorkloadManager(workloadManager fwk.WorkloadManager) Option {
 	}
 }
 
+// WithPreemptionExecutor sets Preemption Executor for the scheduling frameworkImpl.
+func WithPreemptionExecutor(executor *preemption.Executor) Option {
+	return func(o *frameworkOptions) {
+		o.preemptionExecutor = executor
+	}
+}
+
 // CaptureProfile is a callback to capture a finalized profile.
 type CaptureProfile func(config.KubeSchedulerProfile)
 
@@ -346,6 +357,7 @@ func NewFramework(ctx context.Context, r Registry, profile *config.KubeScheduler
 		workloadManager:      options.workloadManager,
 		parallelizer:         options.parallelizer,
 		logger:               logger,
+		preemptionExecutor:   options.preemptionExecutor,
 	}
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.OpportunisticBatching) {
@@ -515,6 +527,10 @@ func (f *frameworkImpl) SetPodActivator(a fwk.PodActivator) {
 
 func (f *frameworkImpl) SetAPICacher(c fwk.APICacher) {
 	f.apiCacher = c
+}
+
+func (f *frameworkImpl) PreemptionExecutor() fwk.PreemptionExecutor {
+	return f.preemptionExecutor
 }
 
 // Close closes each plugin, when they implement io.Closer interface.
@@ -2000,6 +2016,7 @@ func (f *frameworkImpl) SharedCSIManager() fwk.CSIManager {
 func (f *frameworkImpl) WorkloadManager() fwk.WorkloadManager {
 	return f.workloadManager
 }
+
 
 func (f *frameworkImpl) pluginsNeeded(plugins *config.Plugins) sets.Set[string] {
 	pgSet := sets.Set[string]{}

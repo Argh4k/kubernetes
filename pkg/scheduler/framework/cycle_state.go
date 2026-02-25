@@ -30,6 +30,8 @@ type CycleState struct {
 	storage sync.Map
 	// if recordPluginMetrics is true, metrics.PluginExecutionDuration will be recorded for this cycle.
 	recordPluginMetrics bool
+	// if skipPreemptionActuation is true, preemption will only calculate which pods should be preempted, but will not actuate the preemption for this cycle.
+	skipPreemptionActuation bool
 	// skipFilterPlugins are plugins that will be skipped in the Filter extension point.
 	skipFilterPlugins sets.Set[string]
 	// skipScorePlugins are plugins that will be skipped in the Score extension point.
@@ -54,6 +56,14 @@ func (c *CycleState) ShouldRecordPluginMetrics() bool {
 	return c.recordPluginMetrics
 }
 
+// SkipPreemptionActuation returns whether preemption actuation should be skipped in this cycle.
+func (c *CycleState) SkipPreemptionActuation() bool {
+	if c == nil {
+		return false
+	}
+	return c.skipPreemptionActuation
+}
+
 // SetRecordPluginMetrics sets recordPluginMetrics to the given value.
 func (c *CycleState) SetRecordPluginMetrics(flag bool) {
 	if c == nil {
@@ -64,6 +74,13 @@ func (c *CycleState) SetRecordPluginMetrics(flag bool) {
 
 func (c *CycleState) SetSkipFilterPlugins(plugins sets.Set[string]) {
 	c.skipFilterPlugins = plugins
+}
+
+func (c *CycleState) SetSkipPreemptionActuation(flag bool) {
+	if c == nil {
+		return
+	}
+	c.skipPreemptionActuation = flag
 }
 
 func (c *CycleState) GetSkipFilterPlugins() sets.Set[string] {
