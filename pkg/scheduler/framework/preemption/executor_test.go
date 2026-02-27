@@ -295,7 +295,7 @@ func TestPrepareCandidate(t *testing.T) {
 	victimWithDeletionTimestamp.DeletionTimestamp = &metav1.Time{Time: time.Now().Add(-100 * time.Second)}
 	victimWithDeletionTimestamp.Finalizers = []string{"test"}
 
-	preemptorPodMap := func(preemptor Preemptor) map[string]*v1.Pod {
+	preemptorPodMap := func(preemptor fwk.Preemptor) map[string]*v1.Pod {
 		podMap := make(map[string]*v1.Pod)
 		for _, pod := range preemptor.Members() {
 			podMap[pod.Name] = pod
@@ -306,8 +306,8 @@ func TestPrepareCandidate(t *testing.T) {
 	tests := []struct {
 		name      string
 		nodeNames []string
-		candidate Candidate
-		preemptor Preemptor
+		candidate fwk.Candidate
+		preemptor fwk.Preemptor
 		testPods  []*v1.Pod
 		// expectedDeletedPod is the pod name that is expected to be deleted.
 		//
@@ -764,9 +764,9 @@ func TestPrepareCandidateAsyncSetsPreemptingSets(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		candidate  Candidate
+		candidate  fwk.Candidate
 		lastVictim *v1.Pod
-		preemptor  Preemptor
+		preemptor  fwk.Preemptor
 	}{
 		{
 			name: "no victims",
@@ -877,7 +877,7 @@ func TestPrepareCandidateAsyncSetsPreemptingSets(t *testing.T) {
 				executor := newExecutor(fwk) // preemptPodCallsCounter helps verify if the last victim pod gets preempted after other victims.
 				preemptPodCallsCounter := 0
 				preemptFunc := executor.PreemptPod
-				executor.PreemptPod = func(ctx context.Context, c Candidate, preemptor Preemptor, victim *v1.Pod, pluginName string) error {
+				executor.PreemptPod = func(ctx context.Context, c fwk.Candidate, preemptor fwk.Preemptor, victim *v1.Pod, pluginName string) error {
 					// Verify contents of the sets: preempting and lastVictimsPendingPreemption before preemption of subsequent pods.
 					executor.mu.RLock()
 					preemptPodCallsCounter++
@@ -975,7 +975,7 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 		name    string
 		victims []*v1.Pod
 		// Optional: Custom preemptor for Workload/Gang tests. If nil, defaults to defaultPreemptorPod.
-		customPreemptor                      Preemptor
+		customPreemptor                      fwk.Preemptor
 		expectSuccessfulPreemption           bool
 		expectPreemptionAttemptForLastVictim bool
 	}{
@@ -1076,8 +1076,8 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			// 1. Determine which Preemptor to use
-			var currentPreemptor Preemptor
+			// 1. Determine which fwk.Preemptor to use
+			var currentPreemptor fwk.Preemptor
 			if tt.customPreemptor != nil {
 				currentPreemptor = tt.customPreemptor
 			} else {
@@ -1128,7 +1128,7 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 				tf.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 			)
 
-			// Prepare snapshot with Preemptor + Victims
+			// Prepare snapshot with fwk.Preemptor + Victims
 			var snapshotPods []*v1.Pod
 			snapshotPods = append(snapshotPods, currentPreemptor.Members()...)
 			snapshotPods = append(snapshotPods, tt.victims...)
@@ -1193,7 +1193,7 @@ func TestAsyncPreemptionFailure(t *testing.T) {
 			for _, member := range currentPreemptor.Members() {
 				_, isActivated := fakeActivator.activatedPods[member.Name]
 				if isActivated != shouldBeActivated {
-					t.Errorf("Preemptor member %s activated - wanted: %v, got: %v", member.Name, shouldBeActivated, isActivated)
+					t.Errorf("fwk.Preemptor member %s activated - wanted: %v, got: %v", member.Name, shouldBeActivated, isActivated)
 				}
 			}
 

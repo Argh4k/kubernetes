@@ -62,19 +62,22 @@ type Executor struct {
 
 	// PreemptPod is a function that actually makes API calls to preempt a specific Pod.
 	// This is exposed to be replaced during tests.
-	PreemptPod func(ctx context.Context, c Candidate, preemptor Preemptor, victim *v1.Pod, pluginName string) error
+	PreemptPod func(ctx context.Context, c fwk.Candidate, preemptor fwk.Preemptor, victim *v1.Pod, pluginName string) error
 }
 
 // newExecutor creates a new preemption executor.
 func newExecutor(fh fwk.Handle) *Executor {
 	e := &Executor{
 		fh:                           fh,
-		podLister:                    fh.SharedInformerFactory().Core().V1().Pods().Lister(),
 		preempting:                   sets.New[types.UID](),
 		lastVictimsPendingPreemption: make(map[types.UID]pendingVictim),
 	}
 
-	e.PreemptPod = func(ctx context.Context, c Candidate, preemptor Preemptor, victim *v1.Pod, pluginName string) error {
+	if fh.SharedInformerFactory() != nil {
+		e.podLister = fh.SharedInformerFactory().Core().V1().Pods().Lister()
+	}
+
+	e.PreemptPod = func(ctx context.Context, c fwk.Candidate, preemptor fwk.Preemptor, victim *v1.Pod, pluginName string) error {
 		logger := klog.FromContext(ctx)
 
 		representative := preemptor.GetRepresentativePod()
@@ -84,13 +87,13 @@ func newExecutor(fh fwk.Handle) *Executor {
 		// Otherwise we should delete the victim.
 		if waitingPod := e.fh.GetWaitingPod(victim.UID); waitingPod != nil {
 			if waitingPod.Preempt(pluginName, "preempted") {
-				logger.V(2).Info("Preemptor preempted a waiting pod", "preemptor", klog.KObj(preemptor), "waitingPod", klog.KObj(victim), "domain", c.Name())
+				logger.V(2).Info("fwk.Preemptor preempted a waiting pod", "preemptor", klog.KObj(preemptor), "waitingPod", klog.KObj(victim), "domain", c.Name())
 				skipAPICall = true
 			}
 		} else if podInPreBind := e.fh.GetPodInPreBind(victim.UID); podInPreBind != nil {
 			// If the victim is in the preBind cancel the binding process.
 			if podInPreBind.CancelPod(fmt.Sprintf("preempted by %s", pluginName)) {
-				logger.V(2).Info("Preemptor pod rejected a pod in preBind", "preemptor", klog.KObj(preemptor), "podInPreBind", klog.KObj(victim), "node", c.Name())
+				logger.V(2).Info("fwk.Preemptor pod rejected a pod in preBind", "preemptor", klog.KObj(preemptor), "podInPreBind", klog.KObj(victim), "node", c.Name())
 				skipAPICall = true
 			} else {
 				logger.V(5).Info("Failed to reject a pod in preBind, falling back to deletion via api call", "preemptor", klog.KObj(preemptor), "podInPreBind", klog.KObj(victim), "node", c.Name())
@@ -128,7 +131,7 @@ func newExecutor(fh fwk.Handle) *Executor {
 				logger.V(2).Info("Victim Pod is already deleted", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "domain", c.Name())
 				return nil
 			}
-			logger.V(2).Info("Preemptor preempted victim Pod", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "domain", c.Name())
+			logger.V(2).Info("fwk.Preemptor preempted victim Pod", "preemptor", klog.KObj(preemptor), "victim", klog.KObj(victim), "domain", c.Name())
 		} else {
 			eventMessage += " (in kube-scheduler memory)."
 		}
@@ -151,7 +154,7 @@ func newExecutor(fh fwk.Handle) *Executor {
 // The Pod won't be retried until the goroutine triggered here completes.
 //
 // See http://kep.k8s.io/4832 for how the async preemption works.
-func (e *Executor) prepareCandidateAsync(c Candidate, preemptor Preemptor, pluginName string) {
+func (e *Executor) prepareCandidateAsync(c fwk.Candidate, preemptor fwk.Preemptor, pluginName string) {
 	// Intentionally create a new context, not using a ctx from the scheduling cycle, to create ctx,
 	// because this process could continue even after this scheduling cycle finishes.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,7 +272,7 @@ func (e *Executor) prepareCandidateAsync(c Candidate, preemptor Preemptor, plugi
 // - Evict the victim pods
 // - Reject the victim pods if they are in waitingPod map
 // - Clear the low-priority pods' nominatedNodeName status if needed
-func (e *Executor) prepareCandidate(ctx context.Context, c Candidate, preemptor Preemptor, pluginName string) *fwk.Status {
+func (e *Executor) prepareCandidate(ctx context.Context, c fwk.Candidate, preemptor fwk.Preemptor, pluginName string) *fwk.Status {
 	metrics.PreemptionVictims.Observe(float64(len(c.Victims().Pods)))
 
 	fh := e.fh
@@ -367,7 +370,7 @@ func clearNominatedNodeName(ctx context.Context, cs clientset.Interface, apiCach
 // manipulation of NodeInfo and PreFilter state per nominated pod. It may not be
 // worth the complexity, especially because we generally expect to have a very
 // small number of nominated pods per node.
-func getLowerPriorityNominatedPods(pn fwk.PodNominator, preemptor Preemptor, nodes []string) []*v1.Pod {
+func getLowerPriorityNominatedPods(pn fwk.PodNominator, preemptor fwk.Preemptor, nodes []string) []*v1.Pod {
 	var podInfos []fwk.PodInfo
 	for _, nodeName := range nodes {
 		podInfos = append(podInfos, pn.NominatedPodsForNode(nodeName)...)

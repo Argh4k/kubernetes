@@ -278,6 +278,11 @@ func (sched *Scheduler) schedulingAlgorithm(
 		// will fit due to the preemption. It is also possible that a different pod will schedule
 		// into the resources that were preempted, but this is harmless.
 
+		if podInfo.NeedsPodGroupScheduling && utilfeature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+			logger.V(5).Info("WorkloadAwarePreemption is enabled, skipping pod by pod post filter plugins in pod group scheduling cycle")
+			return ScheduleResult{nominatingInfo: clearNominatedNode}, fwk.NewStatus(fwk.Unschedulable).WithError(err)
+		}
+
 		if !schedFramework.HasPostFilterPlugins() {
 			logger.V(3).Info("No PostFilter plugins are registered, so no preemption will be performed")
 			return ScheduleResult{nominatingInfo: clearNominatedNode}, fwk.NewStatus(fwk.Unschedulable).WithError(err)
@@ -776,6 +781,15 @@ func (sched *Scheduler) findNodesThatPassFilters(
 	numNodesToFind := sched.numFeasibleNodesToFind(schedFramework.PercentageOfNodesToScore(), int32(numAllNodes))
 	if !sched.hasExtenderFilters() && !sched.hasScoring(schedFramework) {
 		numNodesToFind = 1
+	}
+
+	logger := klog.FromContext(ctx)
+	logger.V(3).Info("findNodesThatPassFilters")
+	for _, n := range nodes {
+		logger.V(3).Info("pods on node:")
+		for _, p := range n.GetPods() {
+			logger.V(3).Info("pod", "name", p.GetPod().Name)
+		}
 	}
 
 	// Create feasible list with enough space to avoid growing it

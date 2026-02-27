@@ -44,6 +44,9 @@ import (
 	apidispatcher "k8s.io/kubernetes/pkg/scheduler/backend/api_dispatcher"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
+	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 )
 
@@ -103,6 +106,8 @@ type frameworkImpl struct {
 	batch *OpportunisticBatch
 
 	enableSignatures bool
+
+	preemptionEvaluator fwk.PreemptionEvaluator
 }
 
 // extensionPoint encapsulates desired and applied set of plugins at a specific extension
@@ -348,6 +353,12 @@ func NewFramework(ctx context.Context, r Registry, profile *config.KubeScheduler
 		logger:               logger,
 	}
 
+	f.preemptionEvaluator = preemption.NewEvaluator(
+		names.DefaultPreemption,
+		f,
+		feature.NewSchedulerFeaturesFromGates(utilfeature.DefaultFeatureGate),
+	)
+
 	if utilfeature.DefaultFeatureGate.Enabled(features.OpportunisticBatching) {
 		f.batch = newOpportunisticBatch(f, signUsingFramework)
 	}
@@ -515,6 +526,11 @@ func (f *frameworkImpl) SetPodActivator(a fwk.PodActivator) {
 
 func (f *frameworkImpl) SetAPICacher(c fwk.APICacher) {
 	f.apiCacher = c
+}
+
+// PreemptionEvaluator returns the PreemptionEvaluator of the scheduling framework.
+func (f *frameworkImpl) PreemptionEvaluator() fwk.PreemptionEvaluator {
+	return f.preemptionEvaluator
 }
 
 // Close closes each plugin, when they implement io.Closer interface.

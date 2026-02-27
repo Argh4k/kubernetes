@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	v1 "k8s.io/api/core/v1"
@@ -39,27 +40,6 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/util"
 )
 
-// Interface is expected to be implemented by different preemption plugins as all those member
-// methods might have different behavior compared with the default preemption.
-type Interface interface {
-	// GetOffsetAndNumCandidates chooses a random offset and calculates the number of candidates that should be
-	// shortlisted for dry running preemption.
-	GetOffsetAndNumCandidates(nodes int32) (int32, int32)
-	// CandidatesToVictimsMap builds a map from the target node to a list of to-be-preempted Pods and the number of PDB violation.
-	CandidatesToVictimsMap(candidates []Candidate) map[string]*extenderv1.Victims
-	// PodEligibleToPreemptOthers returns one bool and one string. The bool indicates whether this pod should be considered for
-	// preempting other pods or not. The string includes the reason if this pod isn't eligible.
-	PodEligibleToPreemptOthers(ctx context.Context, pod *v1.Pod, nominatedNodeStatus *fwk.Status) (bool, string)
-	// SelectVictimsOnDomain finds minimum set of pods on the given domain that should be preempted in order to make enough room
-	// for "pods" from preemptor to be scheduled.
-	// Note that both `preemptor` (with its state) and `nodeInfo` are deep copied.
-	SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) ([]*v1.Pod, int, *fwk.Status)
-	// OrderedScoreFuncs returns a list of ordered score functions to select preferable node where victims will be preempted.
-	// The ordered score functions will be processed one by one iff we find more than one node with the highest score.
-	// Default score functions will be processed if nil returned here for backwards-compatibility.
-	OrderedScoreFuncs(ctx context.Context, nodesToVictims map[string]*extenderv1.Victims) []func(node string) int64
-}
-
 type Evaluator struct {
 	PluginName string
 	Handler    fwk.Handle
@@ -71,20 +51,24 @@ type Evaluator struct {
 	podGroupIndex                 map[util.PodGroupKey][]fwk.PodInfo
 
 	*Executor
-	Interface
 }
 
-func NewEvaluator(pluginName string, fh fwk.Handle, i Interface, fts feature.Features) *Evaluator {
-	return &Evaluator{
+func NewEvaluator(pluginName string, fh fwk.Handle, fts feature.Features) *Evaluator {
+	ev :=  &Evaluator{
 		PluginName:                    pluginName,
 		Handler:                       fh,
-		PodLister:                     fh.SharedInformerFactory().Core().V1().Pods().Lister(),
-		PdbLister:                     fh.SharedInformerFactory().Policy().V1().PodDisruptionBudgets().Lister(),
 		enableAsyncPreemption:         fts.EnableAsyncPreemption,
 		Executor:                      newExecutor(fh),
-		Interface:                     i,
 		enableWorkloadAwarePreemption: fts.EnableWorkloadAwarePreemption,
 	}
+
+	// This can happen only in unit tests
+	if fh.SharedInformerFactory() != nil {
+		ev.PodLister = fh.SharedInformerFactory().Core().V1().Pods().Lister()
+		ev.PdbLister = fh.SharedInformerFactory().Policy().V1().PodDisruptionBudgets().Lister()
+	}
+
+	return ev
 }
 
 // buildPodGroupIndex constructs a cluster-wide index mapping Workload identities (PodGroupKey)
@@ -94,7 +78,7 @@ func NewEvaluator(pluginName string, fh fwk.Handle, i Interface, fts feature.Fea
 // efficiently identify the full "blast radius" of a preemption: by looking up a key in this
 // index, we can instantly retrieve all "sibling" pods of a potential victim. This ensures
 // that if a Workload is selected as a victim, all its members across different nodes can be
-// identified and treated as a single atomic PreemptionUnit.
+// identified and treated as a single atomic fwk.PreemptionUnit.
 //
 // TODO: Replace this with a more efficient framework-level lookup mechanism.
 // Currently, building this index requires an O(TotalPods) iteration across all nodes,
@@ -134,40 +118,46 @@ func buildPodGroupIndex(allNodes []fwk.NodeInfo) map[util.PodGroupKey][]fwk.PodI
 //
 //   - <non-nil PostFilterResult, Success>. It's the regular happy path
 //     and the non-empty nominatedNodeName will be applied to the preemptor pod.
-func (ev *Evaluator) Preempt(ctx context.Context, preemptor Preemptor, m fwk.NodeToStatusReader) (*fwk.PostFilterResult, *fwk.Status) {
+func (ev *Evaluator) Preempt(ctx context.Context, preemptor fwk.Preemptor, m fwk.NodeToStatusReader, pi fwk.PreemptionPluginInterface) (*fwk.PostFilterResult, *fwk.Status) {
 	logger := klog.FromContext(ctx)
 
 	if !preemptor.IsEligibleToPreemptOthers() {
 		return nil, fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "Preemptor couldn't preempt other victims because of preemptionPolicy: never")
 	}
 
-	for _, pod := range preemptor.Members() {
-		// 0) Fetch the latest version of <pod>.
-		// It's safe to directly fetch pod here. Because the informer cache has already been
-		// initialized when creating the Scheduler obj.
-		// However, tests may need to manually initialize the shared pod informer.
-		podNamespace, podName := pod.Namespace, pod.Name
-		pod, err := ev.PodLister.Pods(pod.Namespace).Get(pod.Name)
-		if err != nil {
-			logger.Error(err, "Could not get the updated preemptor pod object", "pod", klog.KRef(podNamespace, podName))
-			return nil, fwk.AsStatus(err)
-		}
+	logger.V(3).Info(fmt.Sprintf("Preemptor is PodGroup=%v", preemptor.IsPodGroup()))
 
-		// 1) Ensure that pod related to the preemptor is eligible to preempt other pods.
-		nominatedNodeStatus := m.Get(pod.Status.NominatedNodeName)
-		if ok, msg := ev.PodEligibleToPreemptOthers(ctx, pod, nominatedNodeStatus); !ok {
-			logger.V(5).Info("Pod is not eligible for preemption", "pod", klog.KObj(pod), "reason", msg)
-			return nil, fwk.NewStatus(fwk.Unschedulable, msg)
+	if !preemptor.IsPodGroup() {
+		for _, pod := range preemptor.Members() {
+			// 0) Fetch the latest version of <pod>.
+			// It's safe to directly fetch pod here. Because the informer cache has already been
+			// initialized when creating the Scheduler obj.
+			// However, tests may need to manually initialize the shared pod informer.
+			podNamespace, podName := pod.Namespace, pod.Name
+			pod, err := ev.PodLister.Pods(pod.Namespace).Get(pod.Name)
+			if err != nil {
+				logger.Error(err, "Could not get the updated preemptor pod object", "pod", klog.KRef(podNamespace, podName))
+				return nil, fwk.AsStatus(err)
+			}
+
+			// 1) Ensure that pod related to the preemptor is eligible to preempt other pods.
+			// TODO(Argh4k): fix that
+			nominatedNodeStatus := m.Get(pod.Status.NominatedNodeName)
+			if ok, msg := pi.PodEligibleToPreemptOthers(ctx, pod, nominatedNodeStatus); !ok {
+				logger.V(5).Info("Pod is not eligible for preemption", "pod", klog.KObj(pod), "reason", msg)
+				return nil, fwk.NewStatus(fwk.Unschedulable, msg)
+			}
 		}
 	}
 
 	// 2) Find all preemption candidates.
 	allNodes, err := ev.Handler.SnapshotSharedLister().NodeInfos().List()
+	logger.V(3).Info(fmt.Sprintf("Found %d nodes", len(allNodes)))
 	if err != nil {
 		return nil, fwk.AsStatus(err)
 	}
 	var (
-		candidates      []Candidate
+		candidates      []fwk.Candidate
 		nodeToStatusMap *framework.NodeToStatus
 	)
 	if len(allNodes) == 0 {
@@ -175,9 +165,10 @@ func (ev *Evaluator) Preempt(ctx context.Context, preemptor Preemptor, m fwk.Nod
 	}
 	if ev.enableWorkloadAwarePreemption {
 		ev.podGroupIndex = buildPodGroupIndex(allNodes)
-		candidates, nodeToStatusMap, err = ev.findCandidatesForWorkloadAwarePreemption(ctx, preemptor, allNodes)
+		candidates, nodeToStatusMap, err = ev.findCandidatesForWorkloadAwarePreemption(ctx, preemptor, allNodes, pi)
+		logger.V(3).Info(fmt.Sprintf("Found %d candidates for workload aware preemption", len(candidates)))
 	} else {
-		candidates, nodeToStatusMap, err = ev.findCandidatesForPodPreemption(ctx, allNodes, preemptor, m)
+		candidates, nodeToStatusMap, err = ev.findCandidatesForPodPreemption(ctx, allNodes, preemptor, m, pi)
 	}
 	if err != nil && len(candidates) == 0 {
 		return nil, fwk.AsStatus(err)
@@ -200,13 +191,13 @@ func (ev *Evaluator) Preempt(ctx context.Context, preemptor Preemptor, m fwk.Nod
 	}
 
 	// 3) Interact with registered Extenders to filter out some candidates if needed.
-	candidates, status := ev.callExtenders(logger, preemptor, candidates)
+	candidates, status := ev.callExtenders(logger, preemptor, candidates, pi)
 	if !status.IsSuccess() {
 		return nil, status
 	}
 
 	// 4) Find the best candidate.
-	bestCandidate := ev.SelectCandidate(ctx, candidates)
+	bestCandidate := ev.SelectCandidate(ctx, candidates, pi)
 	if bestCandidate == nil || len(bestCandidate.Name()) == 0 {
 		return nil, fwk.NewStatus(fwk.Unschedulable, "no candidate node for preemption")
 	}
@@ -225,13 +216,13 @@ func (ev *Evaluator) Preempt(ctx context.Context, preemptor Preemptor, m fwk.Nod
 	return framework.NewPostFilterResult(bestCandidate.Name(), bestCandidate.Victims().Pods), fwk.NewStatus(fwk.Success)
 }
 
-func (ev *Evaluator) findCandidatesForWorkloadAwarePreemption(ctx context.Context, preemptor Preemptor, allNodes []fwk.NodeInfo) ([]Candidate, *framework.NodeToStatus, error) {
+func (ev *Evaluator) findCandidatesForWorkloadAwarePreemption(ctx context.Context, preemptor fwk.Preemptor, allNodes []fwk.NodeInfo, pi fwk.PreemptionPluginInterface) ([]fwk.Candidate, *framework.NodeToStatus, error) {
 	pdbs, err := getPodDisruptionBudgets(ev.PdbLister)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var domains []Domain
+	var domains []fwk.Domain
 	if preemptor.IsPodGroup() {
 		domains = append(domains, ev.newSingleDomainForAllNodes(preemptor, allNodes))
 	} else {
@@ -240,13 +231,15 @@ func (ev *Evaluator) findCandidatesForWorkloadAwarePreemption(ctx context.Contex
 		}
 	}
 
-	offset, candidatesNum := ev.GetOffsetAndNumCandidates(int32(len(domains)))
-	return ev.DryRunPreemption(ctx, preemptor, domains, pdbs, offset, candidatesNum)
+	offset, candidatesNum := pi.GetOffsetAndNumCandidates(int32(len(domains)))
+	logger := klog.FromContext(ctx)
+	logger.V(3).Info(fmt.Sprintf("Offset: %d, candidatesNum: %d", offset, candidatesNum))
+	return ev.DryRunPreemption(ctx, preemptor, domains, pdbs, offset, candidatesNum, pi)
 }
 
 // FindCandidates calculates a slice of preemption candidates.
 // Each candidate is executable to make the given <pod> schedulable.
-func (ev *Evaluator) findCandidatesForPodPreemption(ctx context.Context, allNodes []fwk.NodeInfo, preemptor Preemptor, m fwk.NodeToStatusReader) ([]Candidate, *framework.NodeToStatus, error) {
+func (ev *Evaluator) findCandidatesForPodPreemption(ctx context.Context, allNodes []fwk.NodeInfo, preemptor fwk.Preemptor, m fwk.NodeToStatusReader, pi fwk.PreemptionPluginInterface) ([]fwk.Candidate, *framework.NodeToStatus, error) {
 	logger := klog.FromContext(ctx)
 
 	potentialNodes, err := m.NodesForStatusCode(ev.Handler.SnapshotSharedLister().NodeInfos(), fwk.Unschedulable)
@@ -264,24 +257,24 @@ func (ev *Evaluator) findCandidatesForPodPreemption(ctx context.Context, allNode
 		return nil, nil, err
 	}
 
-	var domains []Domain
+	var domains []fwk.Domain
 	for _, node := range potentialNodes {
-		victims := make([]PreemptionUnit, 0, len(node.GetPods()))
+		victims := make([]fwk.PreemptionUnit, 0, len(node.GetPods()))
 		for _, pi := range node.GetPods() {
 			victims = append(victims, newPreemptionUnit([]fwk.PodInfo{pi}, corev1helpers.PodPriority(pi.GetPod()), []fwk.NodeInfo{node}))
 		}
 		domains = append(domains, ev.newDomain(node.Node().Name, []fwk.NodeInfo{node}, victims))
 	}
 
-	offset, candidatesNum := ev.GetOffsetAndNumCandidates(int32(len(domains)))
-	return ev.DryRunPreemption(ctx, preemptor, domains, pdbs, offset, candidatesNum)
+	offset, candidatesNum := pi.GetOffsetAndNumCandidates(int32(len(domains)))
+	return ev.DryRunPreemption(ctx, preemptor, domains, pdbs, offset, candidatesNum, pi)
 }
 
 // callExtenders calls given <extenders> to select the list of feasible candidates.
 // We will only check <candidates> with extenders that support preemption.
 // Extenders which do not support preemption may later prevent preemptor from being scheduled on the nominated
 // node. In that case, scheduler will find a different host for the preemptor in subsequent scheduling cycles.
-func (ev *Evaluator) callExtenders(logger klog.Logger, preemptor Preemptor, candidates []Candidate) ([]Candidate, *fwk.Status) {
+func (ev *Evaluator) callExtenders(logger klog.Logger, preemptor fwk.Preemptor, candidates []fwk.Candidate, pi fwk.PreemptionPluginInterface) ([]fwk.Candidate, *fwk.Status) {
 	if !preemptor.SupportExtenders() {
 		return candidates, nil
 	}
@@ -294,7 +287,7 @@ func (ev *Evaluator) callExtenders(logger klog.Logger, preemptor Preemptor, cand
 
 	// Migrate candidate slice to victimsMap to adapt to the Extender interface.
 	// It's only applicable for candidate slice that have unique nominated node name.
-	victimsMap := ev.CandidatesToVictimsMap(candidates)
+	victimsMap := pi.CandidatesToVictimsMap(candidates)
 	if len(victimsMap) == 0 {
 		return candidates, nil
 	}
@@ -333,7 +326,7 @@ func (ev *Evaluator) callExtenders(logger klog.Logger, preemptor Preemptor, cand
 		}
 	}
 
-	var newCandidates []Candidate
+	var newCandidates []fwk.Candidate
 	for nodeName := range victimsMap {
 		newCandidates = append(newCandidates, &candidate{
 			victims: victimsMap[nodeName],
@@ -345,7 +338,7 @@ func (ev *Evaluator) callExtenders(logger klog.Logger, preemptor Preemptor, cand
 
 // SelectCandidate chooses the best-fit candidate from given <candidates> and return it.
 // NOTE: This method is exported for easier testing in default preemption.
-func (ev *Evaluator) SelectCandidate(ctx context.Context, candidates []Candidate) Candidate {
+func (ev *Evaluator) SelectCandidate(ctx context.Context, candidates []fwk.Candidate, pi fwk.PreemptionPluginInterface) fwk.Candidate {
 	logger := klog.FromContext(ctx)
 
 	if len(candidates) == 0 {
@@ -355,8 +348,8 @@ func (ev *Evaluator) SelectCandidate(ctx context.Context, candidates []Candidate
 		return candidates[0]
 	}
 
-	victimsMap := ev.CandidatesToVictimsMap(candidates)
-	scoreFuncs := ev.OrderedScoreFuncs(ctx, victimsMap)
+	victimsMap := pi.CandidatesToVictimsMap(candidates)
+	scoreFuncs := pi.OrderedScoreFuncs(ctx, victimsMap)
 	candidateNode := pickOneNodeForPreemption(logger, victimsMap, scoreFuncs)
 
 	// Same as candidatesToVictimsMap, this logic is not applicable for out-of-tree
@@ -487,8 +480,8 @@ func pickOneNodeForPreemption(logger klog.Logger, nodesToVictims map[string]*ext
 // The number of candidates depends on the constraints defined in the plugin's args. In the returned list of
 // candidates, ones that do not violate PDB are preferred over ones that do.
 // NOTE: This method is exported for easier testing in default preemption.
-func (ev *Evaluator) DryRunPreemption(ctx context.Context, preemptor Preemptor, domains []Domain,
-	pdbs []*policy.PodDisruptionBudget, offset int32, candidatesNum int32) ([]Candidate, *framework.NodeToStatus, error) {
+func (ev *Evaluator) DryRunPreemption(ctx context.Context, preemptor fwk.Preemptor, domains []fwk.Domain,
+	pdbs []*policy.PodDisruptionBudget, offset int32, candidatesNum int32, pi fwk.PreemptionPluginInterface) ([]fwk.Candidate, *framework.NodeToStatus, error) {
 
 	fh := ev.Handler
 	nonViolatingCandidates := newCandidateList(candidatesNum)
@@ -503,11 +496,17 @@ func (ev *Evaluator) DryRunPreemption(ctx context.Context, preemptor Preemptor, 
 	var statusesLock sync.Mutex
 	var errs []error
 	checkDomain := func(i int) {
-		domain := domains[(int(offset)+i)%len(domains)].Snapshot()
-		logger.V(5).Info("Check the potential domain for preemption", "domain", domain)
+
+		domain := domains[(int(offset)+i)%len(domains)]
+		if !strings.Contains(domain.GetName(), "Cluster-Scope") {
+			domain = domain.Snapshot()
+		} else {
+			logger.V(3).Info("not snapshotting domian")
+		}
+		logger.V(3).Info("Check the potential domain for preemption")
 
 		preemptorSnapshot := preemptor.Snapshot()
-		pods, numPDBViolations, status := ev.SelectVictimsOnDomain(ctx, preemptorSnapshot, domain, pdbs)
+		pods, numPDBViolations, status := pi.SelectVictimsOnDomain(ctx, preemptorSnapshot, domain, pdbs)
 
 		if status.IsSuccess() && len(pods) != 0 {
 			victims := extenderv1.Victims{
@@ -545,7 +544,7 @@ func (ev *Evaluator) DryRunPreemption(ctx context.Context, preemptor Preemptor, 
 	return append(nonViolatingCandidates.get(), violatingCandidates.get()...), nodeStatuses, utilerrors.NewAggregate(errs)
 }
 
-func (ev *Evaluator) newSingleDomainForAllNodes(preemptor Preemptor, potentialNodes []fwk.NodeInfo) Domain {
+func (ev *Evaluator) newSingleDomainForAllNodes(preemptor fwk.Preemptor, potentialNodes []fwk.NodeInfo) fwk.Domain {
 	podGroupName := preemptor.GetRepresentativePod().Spec.WorkloadRef.PodGroup
 	domainName := fmt.Sprintf("Cluster-Scope-%s", podGroupName)
 
@@ -556,7 +555,7 @@ func (ev *Evaluator) newSingleDomainForAllNodes(preemptor Preemptor, potentialNo
 	}
 }
 
-func (ev *Evaluator) newDomain(name string, nodes []fwk.NodeInfo, victims []PreemptionUnit) Domain {
+func (ev *Evaluator) newDomain(name string, nodes []fwk.NodeInfo, victims []fwk.PreemptionUnit) fwk.Domain {
 	return &domain{
 		nodes:              nodes,
 		name:               name,
@@ -564,9 +563,9 @@ func (ev *Evaluator) newDomain(name string, nodes []fwk.NodeInfo, victims []Pree
 	}
 }
 
-func (ev *Evaluator) getAllPossibleVictims(nodes []fwk.NodeInfo) []PreemptionUnit {
+func (ev *Evaluator) getAllPossibleVictims(nodes []fwk.NodeInfo) []fwk.PreemptionUnit {
 	processedPodGroups := make(map[util.PodGroupKey]bool)
-	var allVictims []PreemptionUnit
+	var allVictims []fwk.PreemptionUnit
 	nodeInfoLister := ev.Handler.SnapshotSharedLister().NodeInfos()
 
 	for _, node := range nodes {

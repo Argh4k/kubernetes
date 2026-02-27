@@ -48,6 +48,48 @@ type Snapshot struct {
 	assumedPods map[string]*v1.Pod
 }
 
+// SaveSnapshot provides a way to temporarily backup the snapshot's state
+// and returns a restore function. This is primarily used in workload-aware
+// preemption to simulate pod group preemption by mutating deep copies of NodeInfos.
+func (s *Snapshot) SaveSnapshot() func() {
+	origNodeInfoMap := s.nodeInfoMap
+	origNodeInfoList := s.nodeInfoList
+	origHavePodsWithAffinityNodeInfoList := s.havePodsWithAffinityNodeInfoList
+	origHavePodsWithRequiredAntiAffinityNodeInfoList := s.havePodsWithRequiredAntiAffinityNodeInfoList
+
+	clonedNodeInfoMap := make(map[string]*framework.NodeInfo, len(s.nodeInfoMap))
+	for k, v := range s.nodeInfoMap {
+		clonedNodeInfoMap[k] = v.Snapshot().(*framework.NodeInfo)
+	}
+
+	clonedNodeInfoList := make([]fwk.NodeInfo, 0, len(clonedNodeInfoMap))
+	clonedHavePodsWithAffinityNodeInfoList := make([]fwk.NodeInfo, 0, len(clonedNodeInfoMap))
+	clonedHavePodsWithRequiredAntiAffinityNodeInfoList := make([]fwk.NodeInfo, 0, len(clonedNodeInfoMap))
+
+	for _, v := range s.nodeInfoList {
+		clonedNode := clonedNodeInfoMap[v.Node().Name]
+		clonedNodeInfoList = append(clonedNodeInfoList, clonedNode)
+		if len(clonedNode.PodsWithAffinity) > 0 {
+			clonedHavePodsWithAffinityNodeInfoList = append(clonedHavePodsWithAffinityNodeInfoList, clonedNode)
+		}
+		if len(clonedNode.PodsWithRequiredAntiAffinity) > 0 {
+			clonedHavePodsWithRequiredAntiAffinityNodeInfoList = append(clonedHavePodsWithRequiredAntiAffinityNodeInfoList, clonedNode)
+		}
+	}
+
+	s.nodeInfoMap = clonedNodeInfoMap
+	s.nodeInfoList = clonedNodeInfoList
+	s.havePodsWithAffinityNodeInfoList = clonedHavePodsWithAffinityNodeInfoList
+	s.havePodsWithRequiredAntiAffinityNodeInfoList = clonedHavePodsWithRequiredAntiAffinityNodeInfoList
+
+	return func() {
+		s.nodeInfoMap = origNodeInfoMap
+		s.nodeInfoList = origNodeInfoList
+		s.havePodsWithAffinityNodeInfoList = origHavePodsWithAffinityNodeInfoList
+		s.havePodsWithRequiredAntiAffinityNodeInfoList = origHavePodsWithRequiredAntiAffinityNodeInfoList
+	}
+}
+
 var _ fwk.SharedLister = &Snapshot{}
 
 // NewEmptySnapshot initializes a Snapshot struct and returns it.

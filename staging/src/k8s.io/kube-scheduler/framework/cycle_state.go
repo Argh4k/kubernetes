@@ -53,6 +53,12 @@ type CycleState interface {
 	// SetSkipFilterPlugins sets plugins that should be skipped in the Filter extension point.
 	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
 	SetSkipFilterPlugins(plugins sets.Set[string])
+	// GetSkipPostFilterPlugins returns plugins that will be skipped in the PostFilter extension point.
+	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
+	GetSkipPostFilterPlugins() sets.Set[string]
+	// SetSkipPostFilterPlugins sets plugins that should be skipped in the PostFilter extension point.
+	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
+	SetSkipPostFilterPlugins(plugins sets.Set[string])
 	// GetSkipScorePlugins returns plugins that will be skipped in the Score extension point.
 	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
 	GetSkipScorePlugins() sets.Set[string]

@@ -32,6 +32,8 @@ type CycleState struct {
 	recordPluginMetrics bool
 	// skipFilterPlugins are plugins that will be skipped in the Filter extension point.
 	skipFilterPlugins sets.Set[string]
+	// skipPostFilterPlugins are plugins that will be skipped in the PostFilter extension point.
+	skipPostFilterPlugins sets.Set[string]
 	// skipScorePlugins are plugins that will be skipped in the Score extension point.
 	skipScorePlugins sets.Set[string]
 	// skipPreBindPlugins are plugins that will be skipped in the PreBind extension point.
@@ -68,6 +70,14 @@ func (c *CycleState) SetSkipFilterPlugins(plugins sets.Set[string]) {
 
 func (c *CycleState) GetSkipFilterPlugins() sets.Set[string] {
 	return c.skipFilterPlugins
+}
+
+func (c *CycleState) SetSkipPostFilterPlugins(plugins sets.Set[string]) {
+	c.skipPostFilterPlugins = plugins
+}
+
+func (c *CycleState) GetSkipPostFilterPlugins() sets.Set[string] {
+	return c.skipPostFilterPlugins
 }
 
 func (c *CycleState) SetSkipScorePlugins(plugins sets.Set[string]) {
@@ -109,6 +119,7 @@ func (c *CycleState) Clone() fwk.CycleState {
 	// The below are not mutated, so we don't have to safe copy.
 	copy.recordPluginMetrics = c.recordPluginMetrics
 	copy.skipFilterPlugins = c.skipFilterPlugins
+	copy.skipPostFilterPlugins = c.skipPostFilterPlugins
 	copy.skipScorePlugins = c.skipScorePlugins
 	copy.skipPreBindPlugins = c.skipPreBindPlugins
 	copy.parallelPreBindPlugins = c.parallelPreBindPlugins

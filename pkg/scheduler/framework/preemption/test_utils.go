@@ -22,12 +22,12 @@ import (
 )
 
 // This is for test usage only, not for the PRODUCTION code
-func NewDomainsForTest(ev Evaluator, preemptor Preemptor, allNodes []fwk.NodeInfo, enableWorkloadAwarePreemption bool) []Domain {
-	var domains []Domain
+func NewDomainsForTest(ev Evaluator, preemptor fwk.Preemptor, allNodes []fwk.NodeInfo, enableWorkloadAwarePreemption bool) []fwk.Domain {
+	var domains []fwk.Domain
 	if enableWorkloadAwarePreemption {
 		ev.podGroupIndex = buildPodGroupIndex(allNodes)
 		if preemptor.IsPodGroup() {
-			return []Domain{ev.newSingleDomainForAllNodes(preemptor, allNodes)}
+			return []fwk.Domain{ev.newSingleDomainForAllNodes(preemptor, allNodes)}
 		}
 		for _, node := range allNodes {
 			nodes := []fwk.NodeInfo{node}
@@ -37,7 +37,7 @@ func NewDomainsForTest(ev Evaluator, preemptor Preemptor, allNodes []fwk.NodeInf
 	}
 
 	for _, node := range allNodes {
-		var victims []PreemptionUnit
+		var victims []fwk.PreemptionUnit
 		for _, pod := range node.GetPods() {
 			victims = append(victims, newPreemptionUnit(
 				[]fwk.PodInfo{pod},

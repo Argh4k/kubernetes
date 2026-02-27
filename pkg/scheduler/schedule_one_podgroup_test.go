@@ -29,13 +29,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/events"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
 	fwk "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	internalcache "k8s.io/kubernetes/pkg/scheduler/backend/cache"
 	fakecache "k8s.io/kubernetes/pkg/scheduler/backend/cache/fake"
@@ -414,6 +417,7 @@ func TestPodGroupSchedulingDefaultAlgorithm(t *testing.T) {
 		expectedGroupStatus podGroupAlgorithmStatus
 		expectedPodStatus   map[string]*fwk.Status
 		expectedPreemption  map[string]bool
+		preemptionMode      preemptionMode
 	}{
 		{
 			name: "All pods feasible",
@@ -673,6 +677,34 @@ func TestPodGroupSchedulingDefaultAlgorithm(t *testing.T) {
 				"p3": fwk.NewStatus(fwk.Unschedulable),
 			},
 		},
+		{
+			name: "One pod require preemption, returning wait on preemption for workload aware preemption",
+			plugin: &fakePodGroupPlugin{
+				filterStatus: map[string]*fwk.Status{
+					"p1": fwk.NewStatus(fwk.Unschedulable),
+					"p2": nil,
+					"p3": nil,
+				},
+				// This should be returned by postfilter plugins if we exclude preemption from it
+				postFilterStatus: map[string]*fwk.Status{
+					"p1": fwk.NewStatus(fwk.Unschedulable),
+				},
+				postFilterResult: map[string]*fwk.PostFilterResult{
+					"p1": nil,
+				},
+				permitStatus: map[string]*fwk.Status{
+					"p2": fwk.NewStatus(fwk.Wait),
+					"p3": fwk.NewStatus(fwk.Wait),
+				},
+			},
+			expectedGroupStatus: podGroupRequiresWorkloadAwarePreemption,
+			expectedPodStatus: map[string]*fwk.Status{
+				"p1": fwk.NewStatus(fwk.Unschedulable),
+				"p2": nil,
+				"p3": nil,
+			},
+			preemptionMode: preemptionModeWorkloadAware,
+		},
 	}
 
 	for _, tt := range tests {
@@ -725,7 +757,14 @@ func TestPodGroupSchedulingDefaultAlgorithm(t *testing.T) {
 				t.Fatalf("Failed to update snapshot: %v", err)
 			}
 
-			result := sched.podGroupSchedulingDefaultAlgorithm(ctx, schedFwk, pgInfo)
+			mode := preemptionModePodByPod
+			if tt.preemptionMode == preemptionModeWorkloadAware {
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.GenericWorkload, true)
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.GangScheduling, true)
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WorkloadAwarePreemption, true)
+				mode = tt.preemptionMode
+			}
+			result := sched.podGroupSchedulingDefaultAlgorithm(ctx, schedFwk, pgInfo, mode)
 
 			if result.status != tt.expectedGroupStatus {
 				t.Errorf("Expected group status: %v, got: %v", tt.expectedGroupStatus, result.status)

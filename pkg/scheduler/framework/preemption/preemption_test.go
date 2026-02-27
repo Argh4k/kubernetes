@@ -69,7 +69,7 @@ type FakePostFilterPlugin struct {
 	numViolatingVictim int
 }
 
-func (pl *FakePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
+func (pl *FakePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor fwk.Preemptor, domain fwk.Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
 	for _, node := range domain.Nodes() {
 		victims = append(victims, node.GetPods()[0].GetPod())
 	}
@@ -80,7 +80,7 @@ func (pl *FakePostFilterPlugin) GetOffsetAndNumCandidates(nodes int32) (int32, i
 	return 0, nodes
 }
 
-func (pl *FakePostFilterPlugin) CandidatesToVictimsMap(candidates []Candidate) map[string]*extenderv1.Victims {
+func (pl *FakePostFilterPlugin) CandidatesToVictimsMap(candidates []fwk.Candidate) map[string]*extenderv1.Victims {
 	return nil
 }
 
@@ -94,7 +94,7 @@ func (pl *FakePostFilterPlugin) OrderedScoreFuncs(ctx context.Context, nodesToVi
 
 type FakePreemptionScorePostFilterPlugin struct{}
 
-func (pl *FakePreemptionScorePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
+func (pl *FakePreemptionScorePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor fwk.Preemptor, domain fwk.Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
 	for _, node := range domain.Nodes() {
 		victims = append(victims, node.GetPods()[0].GetPod())
 	}
@@ -105,7 +105,7 @@ func (pl *FakePreemptionScorePostFilterPlugin) GetOffsetAndNumCandidates(nodes i
 	return 0, nodes
 }
 
-func (pl *FakePreemptionScorePostFilterPlugin) CandidatesToVictimsMap(candidates []Candidate) map[string]*extenderv1.Victims {
+func (pl *FakePreemptionScorePostFilterPlugin) CandidatesToVictimsMap(candidates []fwk.Candidate) map[string]*extenderv1.Victims {
 	m := make(map[string]*extenderv1.Victims, len(candidates))
 	for _, c := range candidates {
 		m[c.Name()] = c.Victims()
@@ -130,7 +130,7 @@ func (pl *FakePreemptionScorePostFilterPlugin) OrderedScoreFuncs(ctx context.Con
 	}
 }
 
-func newPodGroupPreemptor(priority int32, members []*v1.Pod, policy *v1.PreemptionPolicy) Preemptor {
+func newPodGroupPreemptor(priority int32, members []*v1.Pod, policy *v1.PreemptionPolicy) fwk.Preemptor {
 	return &preemptor{
 		priority:         priority,
 		pods:             members,
@@ -143,10 +143,10 @@ func TestDryRunPreemption(t *testing.T) {
 	tests := []struct {
 		name                    string
 		nodes                   []*v1.Node
-		preemptors              []Preemptor
+		preemptors              []fwk.Preemptor
 		initPods                []*v1.Pod
 		numViolatingVictim      int
-		expected                [][]Candidate
+		expected                [][]fwk.Candidate
 		workloadAwarePreemption bool
 	}{
 		{
@@ -155,14 +155,14 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node1").Capacity(veryLargeRes).Obj(),
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				NewPodPreemptor(st.MakePod().Name("p").UID("p").Priority(highPriority).Obj(), framework.NewCycleState()),
 			},
 			initPods: []*v1.Pod{
 				st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj(),
 				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj(),
 			},
-			expected: [][]Candidate{
+			expected: [][]fwk.Candidate{
 				{
 					&candidate{
 						victims: &extenderv1.Victims{
@@ -185,7 +185,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node1").Capacity(veryLargeRes).Obj(),
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				NewPodPreemptor(st.MakePod().Name("p").UID("p").Priority(highPriority).Obj(), framework.NewCycleState()),
 			},
 			initPods: []*v1.Pod{
@@ -193,7 +193,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj(),
 			},
 			numViolatingVictim: 1,
-			expected: [][]Candidate{
+			expected: [][]fwk.Candidate{
 				{
 					&candidate{
 						victims: &extenderv1.Victims{
@@ -218,7 +218,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node1").Capacity(veryLargeRes).Obj(),
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				newPodGroupPreemptor(highPriority,
 					[]*v1.Pod{
 						st.MakePod().Name("pr1").UID("pr1").WorkloadRef(w1).Priority(highPriority).Obj(),
@@ -230,7 +230,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj(),
 			},
 			numViolatingVictim: 0,
-			expected: [][]Candidate{
+			expected: [][]fwk.Candidate{
 				{
 					&candidate{
 						victims: &extenderv1.Victims{
@@ -251,7 +251,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node1").Capacity(veryLargeRes).Obj(),
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				newPodGroupPreemptor(highPriority,
 					[]*v1.Pod{
 						st.MakePod().Name("pr1").UID("pr1").WorkloadRef(w1).Priority(highPriority).Obj(),
@@ -263,7 +263,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj(),
 			},
 			numViolatingVictim: 0,
-			expected: [][]Candidate{
+			expected: [][]fwk.Candidate{
 				{
 					&candidate{
 						victims: &extenderv1.Victims{
@@ -284,7 +284,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakeNode().Name("node1").Capacity(veryLargeRes).Obj(),
 				st.MakeNode().Name("node2").Capacity(veryLargeRes).Obj(),
 			},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				newPodGroupPreemptor(highPriority,
 					[]*v1.Pod{
 						st.MakePod().Name("pr1").UID("pr1").WorkloadRef(w1).Priority(highPriority).Obj(),
@@ -297,7 +297,7 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakePod().Name("p2").UID("p2").Node("node2").WorkloadRef(w2).Priority(midPriority).Obj(),
 			},
 			numViolatingVictim: 0,
-			expected: [][]Candidate{
+			expected: [][]fwk.Candidate{
 				{
 					&candidate{
 						victims: &extenderv1.Victims{
@@ -394,7 +394,7 @@ func TestSelectCandidate(t *testing.T) {
 	tests := []struct {
 		name                    string
 		nodeNames               []string
-		preemptors              []Preemptor
+		preemptors              []fwk.Preemptor
 		initPods                []*v1.Pod
 		expected                string
 		workloadAwarePreemption bool
@@ -402,7 +402,7 @@ func TestSelectCandidate(t *testing.T) {
 		{
 			name:      "pod has different number of containers on each node",
 			nodeNames: []string{"node1", "node2", "node3"},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				NewPodPreemptor(
 					st.MakePod().Name("p").UID("p").Priority(highPriority).Req(veryLargeRes).Obj(),
 					framework.NewCycleState()),
@@ -426,7 +426,7 @@ func TestSelectCandidate(t *testing.T) {
 		{
 			name:      "group of pods as preemptor and whole cluster as domain",
 			nodeNames: []string{"node1", "node2", "node3"},
-			preemptors: []Preemptor{
+			preemptors: []fwk.Preemptor{
 				newPodGroupPreemptor(
 					highPriority,
 					[]*v1.Pod{
@@ -631,8 +631,8 @@ func TestCallExtenders(t *testing.T) {
 			Node(node1Name).SchedulerName(defaultSchedulerName).Priority(midPriority).
 			Containers([]v1.Container{st.MakeContainer().Name("container1").Obj()}).
 			Obj()
-		makeCandidates = func(nodeName string, pods ...*v1.Pod) []Candidate {
-			return []Candidate{
+		makeCandidates = func(nodeName string, pods ...*v1.Pod) []fwk.Candidate {
+			return []fwk.Candidate{
 				&candidate{
 					name: nodeName,
 					victims: &extenderv1.Victims{
@@ -645,9 +645,9 @@ func TestCallExtenders(t *testing.T) {
 	tests := []struct {
 		name           string
 		extenders      []fwk.Extender
-		candidates     []Candidate
+		candidates     []fwk.Candidate
 		wantStatus     *fwk.Status
-		wantCandidates []Candidate
+		wantCandidates []fwk.Candidate
 	}{
 		{
 			name:           "no extenders",
@@ -672,7 +672,7 @@ func TestCallExtenders(t *testing.T) {
 			},
 			candidates:     makeCandidates(node1Name, victim),
 			wantStatus:     fwk.AsStatus(fmt.Errorf("expected at least one victim pod on node %q", node1Name)),
-			wantCandidates: []Candidate{},
+			wantCandidates: []fwk.Candidate{},
 		},
 		{
 			name: "one extender does not support preemption",
@@ -691,7 +691,7 @@ func TestCallExtenders(t *testing.T) {
 			},
 			candidates:     makeCandidates(node1Name, victim),
 			wantStatus:     nil,
-			wantCandidates: []Candidate{},
+			wantCandidates: []fwk.Candidate{},
 		},
 		{
 			name: "one extender returns error and is ignorable",
@@ -718,9 +718,9 @@ func TestCallExtenders(t *testing.T) {
 			extenders: []fwk.Extender{
 				newFakeExtender().WithSupportsPreemption(true),
 			},
-			candidates:     []Candidate{},
+			candidates:     []fwk.Candidate{},
 			wantStatus:     nil,
-			wantCandidates: []Candidate{},
+			wantCandidates: []fwk.Candidate{},
 		},
 	}
 
