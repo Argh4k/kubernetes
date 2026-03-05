@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/util/feature"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
@@ -44,6 +45,8 @@ import (
 	apidispatcher "k8s.io/kubernetes/pkg/scheduler/backend/api_dispatcher"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
+	plfeature "k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
+	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 )
 
@@ -78,13 +81,14 @@ type frameworkImpl struct {
 	// pluginsMap contains all plugins, by name.
 	pluginsMap map[string]fwk.Plugin
 
-	clientSet        clientset.Interface
-	kubeConfig       *restclient.Config
-	eventRecorder    events.EventRecorder
-	informerFactory  informers.SharedInformerFactory
-	sharedDRAManager fwk.SharedDRAManager
-	workloadManager  fwk.WorkloadManager
-	logger           klog.Logger
+	clientSet          clientset.Interface
+	kubeConfig         *restclient.Config
+	eventRecorder      events.EventRecorder
+	informerFactory    informers.SharedInformerFactory
+	sharedDRAManager   fwk.SharedDRAManager
+	workloadManager    fwk.WorkloadManager
+	logger             klog.Logger
+	preemptionExecutor *preemption.Executor
 
 	sharedCSIManager fwk.CSIManager
 
@@ -158,6 +162,7 @@ type frameworkOptions struct {
 	apiDispatcher          *apidispatcher.APIDispatcher
 	workloadManager        fwk.WorkloadManager
 	logger                 *klog.Logger
+	preemptionExecutor     *preemption.Executor
 }
 
 // Option for the frameworkImpl.
@@ -352,6 +357,8 @@ func NewFramework(ctx context.Context, r Registry, profile *config.KubeScheduler
 		f.batch = newOpportunisticBatch(f, signUsingFramework)
 	}
 
+	f.preemptionExecutor = preemption.NewExecutor(f, plfeature.NewSchedulerFeaturesFromGates(feature.DefaultFeatureGate))
+
 	if len(f.extenders) > 0 {
 		// Extender doesn't support any kind of requeueing feature like EnqueueExtensions in the scheduling framework.
 		// We register a defaultEnqueueExtension to fwk.ExtenderName here.
@@ -515,6 +522,10 @@ func (f *frameworkImpl) SetPodActivator(a fwk.PodActivator) {
 
 func (f *frameworkImpl) SetAPICacher(c fwk.APICacher) {
 	f.apiCacher = c
+}
+
+func (f *frameworkImpl) PreemptionExecutor() fwk.PreemptionExecutor {
+	return f.preemptionExecutor
 }
 
 // Close closes each plugin, when they implement io.Closer interface.

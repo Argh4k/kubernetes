@@ -66,6 +66,7 @@ type DefaultPreemption struct {
 	fts       feature.Features
 	args      config.DefaultPreemptionArgs
 	Evaluator *preemption.Evaluator
+	executor  fwk.PreemptionExecutor
 
 	// IsEligiblePod returns whether a victim pod is allowed to be preempted by a preemptor pod.
 	// This filtering is in addition to the internal requirement that the victim pod have lower
@@ -103,7 +104,8 @@ func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Fe
 		fts:  fts,
 		args: *args,
 	}
-	pl.Evaluator = preemption.NewEvaluator(Name, fh, &pl, fts.EnableAsyncPreemption)
+	pl.Evaluator = preemption.NewEvaluator(Name, fh, &pl, nil)
+	pl.executor = fh.PreemptionExecutor()
 
 	// Default behavior: No additional filtering, beyond the internal requirement that the victim pod
 	// have lower priority than the preemptor pod.
@@ -124,6 +126,16 @@ func (pl *DefaultPreemption) PostFilter(ctx context.Context, state fwk.CycleStat
 	}()
 
 	result, status := pl.Evaluator.Preempt(ctx, state, pod, m)
+
+	// Actuate preemptions if evaluator found a candidate for the pod
+	if status.IsSuccess() {
+		v := extenderv1.Victims{
+			Pods: result.Victims,
+		}
+		if status := pl.executor.ActuatePreemption(ctx, result.NominatingInfo.NominatedNodeName, &v, pod, pl.Evaluator.PluginName); !status.IsSuccess() {
+			return nil, status
+		}
+	}
 	msg := status.Message()
 	if len(msg) > 0 {
 		return result, fwk.NewStatus(status.Code(), "preemption: "+msg)
@@ -135,7 +147,7 @@ func (pl *DefaultPreemption) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Sta
 	if !pl.fts.EnableAsyncPreemption {
 		return nil
 	}
-	if pl.Evaluator.IsPodRunningPreemption(p.GetUID()) {
+	if pl.executor.IsPodRunningPreemption(p.GetUID()) {
 		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for the preemption for this pod to be finished")
 	}
 	return nil
