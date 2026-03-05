@@ -1438,13 +1438,13 @@ func TestDryRunPreemption(t *testing.T) {
 					t.Errorf("cycle %d: Unexpected PreFilter Status: %v", cycle, status)
 				}
 
-				offset, numCandidates := pl.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
+				offset, numCandidates := pl.evaluator.Interface.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
 
 				if tt.blockingRules != nil {
-					pl.SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
+					pl.evaluator.Interface.(*DefaultPreemptionImpl).SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
 				}
 
-				got, _, _ := pl.Evaluator.DryRunPreemption(ctx, state, preemptor, nodeInfos, tt.pdbs, offset, numCandidates)
+				got, _, _ := pl.evaluator.DryRunPreemption(ctx, state, preemptor, nodeInfos, tt.pdbs, offset, numCandidates)
 				// Sort the values (inner victims) and the candidate itself (by its NominatedNodeName).
 				for i := range got {
 					victims := got[i].Victims().Pods
@@ -1698,12 +1698,12 @@ func TestSelectBestCandidate(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.blockingRules != nil {
-				pl.SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
+				pl.evaluator.Interface.(*DefaultPreemptionImpl).SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
 			}
 
-			offset, numCandidates := pl.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
-			candidates, _, _ := pl.Evaluator.DryRunPreemption(ctx, state, tt.preemptor, nodeInfos, nil, offset, numCandidates)
-			s := pl.Evaluator.SelectCandidate(ctx, candidates)
+			offset, numCandidates := pl.evaluator.Interface.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
+			candidates, _, _ := pl.evaluator.DryRunPreemption(ctx, state, tt.preemptor, nodeInfos, nil, offset, numCandidates)
+			s := pl.evaluator.SelectCandidate(ctx, candidates)
 			if s == nil || len(s.Name()) == 0 {
 				t.Fatalf("expected any node in %v, but candidate is missing", tt.expected)
 			}
@@ -1929,15 +1929,15 @@ func TestCustomSelection(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.blockingRules != nil {
-				pl.SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
+				pl.evaluator.Interface.(*DefaultPreemptionImpl).SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
 			}
 
 			// Override eligibility logic
 			if tt.eligiblePreemptor != nil {
-				pl.IsEligiblePreemptor = tt.eligiblePreemptor
+				pl.evaluator.Interface.(*DefaultPreemptionImpl).IsEligiblePreemptor = tt.eligiblePreemptor
 			}
-			offset, numCandidates := pl.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
-			candidates, _, _ := pl.Evaluator.DryRunPreemption(ctx, state, tt.preemptor, nodeInfos, nil, offset, numCandidates)
+			offset, numCandidates := pl.evaluator.Interface.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
+			candidates, _, _ := pl.evaluator.DryRunPreemption(ctx, state, tt.preemptor, nodeInfos, nil, offset, numCandidates)
 			// check that the candidates match what's expected
 			if len(tt.expected) != len(candidates) {
 				candidateNames := []string{}
@@ -1947,7 +1947,7 @@ func TestCustomSelection(t *testing.T) {
 				t.Fatalf("expected %d candidates (%+v) but got %d: %+v", len(tt.expected), tt.expected, len(candidates), candidateNames)
 			}
 			for len(candidates) > 0 {
-				selected := pl.Evaluator.SelectCandidate(ctx, candidates)
+				selected := pl.evaluator.SelectCandidate(ctx, candidates)
 
 				expectVictims, ok := tt.expected[selected.Name()]
 				if !ok {
@@ -2068,14 +2068,14 @@ func TestCustomOrdering(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.blockingRules != nil {
-				pl.SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
+				pl.evaluator.Interface.(*DefaultPreemptionImpl).SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
 			}
 
 			if tt.orderVictims != nil {
-				pl.MoreImportantVictim = tt.orderVictims
+				pl.evaluator.Interface.(*DefaultPreemptionImpl).MoreImportantVictim = tt.orderVictims
 			}
-			offset, numCandidates := pl.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
-			candidates, _, _ := pl.Evaluator.DryRunPreemption(ctx, state, tt.preemptor, nodeInfos, nil, offset, numCandidates)
+			offset, numCandidates := pl.evaluator.Interface.GetOffsetAndNumCandidates(int32(len(nodeInfos)))
+			candidates, _, _ := pl.evaluator.DryRunPreemption(ctx, state, tt.preemptor, nodeInfos, nil, offset, numCandidates)
 			if len(candidates) != 1 {
 				t.Fatalf("expected exactly one node but got %+v", candidates)
 			}
@@ -2172,7 +2172,7 @@ func TestPodEligibleToPreemptOthers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, _ := pl.PodEligibleToPreemptOthers(ctx, test.pod, test.nominatedNodeStatus); got != test.expected {
+			if got, _ := pl.evaluator.Interface.PodEligibleToPreemptOthers(ctx, test.pod, test.nominatedNodeStatus); got != test.expected {
 				t.Errorf("expected %t, got %t for pod: %s", test.expected, got, test.pod.Name)
 			}
 		})
@@ -2508,7 +2508,7 @@ func TestPreempt(t *testing.T) {
 						t.Fatal(err)
 					}
 					if test.blockingRules != nil {
-						pl.SimulatePodScheduling = getMockCanPlacePodsFunc(test.blockingRules)
+						pl.evaluator.Interface.(*DefaultPreemptionImpl).SimulatePodScheduling = getMockCanPlacePodsFunc(test.blockingRules)
 					}
 
 					// so that these nodes are eligible for preemption, we set their status
@@ -2518,7 +2518,7 @@ func TestPreempt(t *testing.T) {
 					for _, n := range nodes {
 						nodeToStatusMap.Set(n.Name, fwk.NewStatus(fwk.Unschedulable))
 					}
-					res, status := pl.Evaluator.Preempt(ctx, cycleState, test.preemptor, nodeToStatusMap)
+					res, status := pl.evaluator.Preempt(ctx, cycleState, test.preemptor, nodeToStatusMap)
 					if !status.IsSuccess() && !status.IsRejected() {
 						t.Errorf("unexpected error in preemption: %v", status.AsError())
 					}
@@ -2594,7 +2594,7 @@ func TestPreempt(t *testing.T) {
 					mu.RUnlock()
 
 					// Call preempt again and make sure it doesn't preempt any more pods.
-					res, status = pl.Evaluator.Preempt(ctx, framework.NewCycleState(), test.preemptor, framework.NewDefaultNodeToStatus())
+					res, status = pl.evaluator.Preempt(ctx, framework.NewCycleState(), test.preemptor, framework.NewDefaultNodeToStatus())
 					if !status.IsSuccess() && !status.IsRejected() {
 						t.Errorf("unexpected error in preemption: %v", status.AsError())
 					}
@@ -2970,7 +2970,7 @@ func TestSelectVictimsOnDomain(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pl.SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
+			pl.evaluator.Interface.(*DefaultPreemptionImpl).SimulatePodScheduling = getMockCanPlacePodsFunc(tt.blockingRules)
 
 			var domains []preemption.Domain
 			if tt.enableWorkloadAwarePreemption {
@@ -3024,7 +3024,7 @@ func TestSelectVictimsOnDomain(t *testing.T) {
 			for i, domain := range domains {
 				t.Logf("Checking Domain: %s", domain.GetName())
 
-				gotPods, gotNumViolating, gotStatus := pl.SelectVictimsOnDomain(ctx, tt.preemptor, domain, tt.pdbs)
+				gotPods, gotNumViolating, gotStatus := pl.evaluator.Interface.SelectVictimsOnDomain(ctx, tt.preemptor, domain, tt.pdbs)
 
 				wantStatus := tt.expectedStatus[i]
 				wantCode := fwk.Success

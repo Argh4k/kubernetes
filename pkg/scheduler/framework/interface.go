@@ -24,6 +24,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
@@ -281,7 +282,21 @@ type Framework interface {
 
 	// Close calls Close method of each plugin.
 	Close() error
+
+	// PreemptionEvaluator returns an evaluator that can be used to execute preemption.
+	PreemptionEvaluator() PreemptionEvaluator
 }
+
+// PreemptionEvaluator provides preemption evaluation capability.
+type PreemptionEvaluator interface {
+	// WorkloadAwarePreemption runs preemption for a pod group.
+	WorkloadAwarePreemption(ctx context.Context, states []fwk.CycleState, podGroup []*v1.Pod, workloadImpl WorkloadInterface) *fwk.Status 
+	// Preempt runs preemption for a pod.
+	Preempt(ctx context.Context, state fwk.CycleState, pod *v1.Pod, m fwk.NodeToStatusReader) (*fwk.PostFilterResult, *fwk.Status)
+	// IsPodRunningPreemption returns true if the pod is currently triggering preemption asynchronously.
+	IsPodRunningPreemption(podUID types.UID) bool
+}
+
 
 // NewPostFilterResult creates PostFilterResult with a provided nominated node
 // and a list of victims (if any) that need to be preempted to make the pod schedulable.

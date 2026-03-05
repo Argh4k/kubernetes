@@ -52,6 +52,8 @@ type Executor struct {
 
 	podLister corelisters.PodLister
 
+	enableAsyncPreemption bool
+
 	// preempting is a set that records the pods that are currently triggering preemption asynchronously,
 	// which is used to prevent the pods from entering the scheduling cycle meanwhile.
 	preempting sets.Set[types.UID]
@@ -64,13 +66,18 @@ type Executor struct {
 	PreemptPod func(ctx context.Context, c Candidate, preemptor, victim *v1.Pod, pluginName string) error
 }
 
-// newExecutor creates a new preemption executor.
-func newExecutor(fh fwk.Handle) *Executor {
+func NewExecutor(fh fwk.Handle, enableAsyncPreemption bool) *Executor {
 	e := &Executor{
 		fh:                           fh,
 		podLister:                    fh.SharedInformerFactory().Core().V1().Pods().Lister(),
 		preempting:                   sets.New[types.UID](),
 		lastVictimsPendingPreemption: make(map[types.UID]pendingVictim),
+		enableAsyncPreemption:        enableAsyncPreemption,
+	}
+
+
+	if fh.SharedInformerFactory() != nil {
+		e.podLister = fh.SharedInformerFactory().Core().V1().Pods().Lister()
 	}
 
 	e.PreemptPod = func(ctx context.Context, c Candidate, preemptor, victim *v1.Pod, pluginName string) error {
@@ -133,6 +140,20 @@ func newExecutor(fh fwk.Handle) *Executor {
 	}
 
 	return e
+}
+
+// ActuateCandidate performs the preparation work before nominating the selected candidate.
+// It bypasses the eligibility and dry-run steps of the standard Preempt routine.
+func (e *Executor) ActuateCandidate(ctx context.Context, bestCandidate fwk.PreemptionCandidate, pod *v1.Pod, pluginName string) *fwk.Status {
+	if e.enableAsyncPreemption {
+		e.prepareCandidateAsync(bestCandidate, pod, pluginName)
+	} else {
+		if status := e.prepareCandidate(ctx, bestCandidate, pod, pluginName); !status.IsSuccess() {
+			return status
+		}
+	}
+
+	return fwk.NewStatus(fwk.Success)
 }
 
 // prepareCandidateAsync triggers a goroutine for some preparation work:

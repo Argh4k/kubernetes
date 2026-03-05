@@ -279,6 +279,11 @@ func (sched *Scheduler) schedulingAlgorithm(
 			return ScheduleResult{nominatingInfo: clearNominatedNode}, fwk.AsStatus(err)
 		}
 
+		if podInfo.NeedsPodGroupScheduling && utilfeature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+			logger.V(5).Info("WorkloadAwarePreemption is enabled, skipping pod by pod post filter plugins in pod group scheduling cycle")
+			return ScheduleResult{nominatingInfo: clearNominatedNode}, fwk.NewStatus(fwk.Unschedulable).WithError(err)
+		}
+
 		// SchedulePod() may have failed because the pod would not fit on any host, so we try to
 		// preempt, with the expectation that the next time the pod is tried for scheduling it
 		// will fit due to the preemption. It is also possible that a different pod will schedule

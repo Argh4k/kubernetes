@@ -70,12 +70,19 @@ type SimulatePodSchedulingFunc func(ctx context.Context,
 	preemptor preemption.Preemptor,
 	domain preemption.Domain) *fwk.Status
 
-// DefaultPreemption is a PostFilter plugin implements the preemption logic.
-type DefaultPreemption struct {
+type DefaultPreemptionPlugin struct {
 	fh        fwk.Handle
 	fts       feature.Features
-	args      config.DefaultPreemptionArgs
-	Evaluator *preemption.Evaluator
+	evaluator *preemption.Evaluator
+}
+
+var _ fwk.PostFilterPlugin = &DefaultPreemptionPlugin{}
+var _ fwk.PreEnqueuePlugin = &DefaultPreemptionPlugin{}
+
+type DefaultPreemptionImpl struct {
+	fh   fwk.Handle
+	fts  feature.Features
+	args config.DefaultPreemptionArgs
 
 	IsEligiblePreemptor IsEligiblePreemptorFunc
 
@@ -84,16 +91,48 @@ type DefaultPreemption struct {
 	SimulatePodScheduling SimulatePodSchedulingFunc
 }
 
-var _ fwk.PostFilterPlugin = &DefaultPreemption{}
-var _ fwk.PreEnqueuePlugin = &DefaultPreemption{}
+func NewDefaultPodByPodPreemptionImpl(args config.DefaultPreemptionArgs, fh fwk.Handle, fts feature.Features) *DefaultPreemptionImpl {
+	return &DefaultPreemptionImpl{
+		IsEligiblePreemptor: func(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
+			return true
+		},
+		MoreImportantVictim: util.MoreImportantVictim,
+		SimulatePodScheduling: func(ctx context.Context,
+			preemptor preemption.Preemptor,
+			domain preemption.Domain) *fwk.Status {
+			nodes := domain.Nodes()
+			pods := preemptor.Members()
+			states := preemptor.CycleStates()
 
-// Name returns name of the plugin. It is used in logs, etc.
-func (pl *DefaultPreemption) Name() string {
+			if len(pods) == 1 && len(nodes) == 1 {
+				return fh.RunFilterPluginsWithNominatedPods(ctx, states[0], pods[0], nodes[0])
+			}
+			return nil
+		},
+	}
+}
+
+func NewWorkloadAwarePreemptionImpl(fh fwk.Handle, fts feature.Features, podGroupSchedule func(ctx context.Context)*fwk.Status) *DefaultPreemptionImpl {
+	return &DefaultPreemptionImpl{
+		IsEligiblePreemptor: func(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
+			return true
+		},
+		MoreImportantVictim: util.MoreImportantVictim,
+		SimulatePodScheduling: func(ctx context.Context,
+			_ preemption.Preemptor,
+			_ preemption.Domain) *fwk.Status {
+			return podGroupSchedule(ctx)
+		},
+	}
+}
+
+var _ preemption.Interface = &DefaultPreemptionImpl{}
+
+func (pl *DefaultPreemptionPlugin) Name() string {
 	return Name
 }
 
-// New initializes a new plugin and returns it. The plugin type is retained to allow modification.
-func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Features) (*DefaultPreemption, error) {
+func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Features) (*DefaultPreemptionPlugin, error) {
 	args, ok := dpArgs.(*config.DefaultPreemptionArgs)
 	if !ok {
 		return nil, fmt.Errorf("got args of type %T, want *DefaultPreemptionArgs", dpArgs)
@@ -102,21 +141,19 @@ func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Fe
 		return nil, err
 	}
 
-	pl := DefaultPreemption{
+	impl := DefaultPreemptionImpl{
 		fh:   fh,
 		fts:  fts,
 		args: *args,
 	}
-	evaluator := preemption.NewEvaluator(Name, fh, &pl, fts)
-	pl.Evaluator = evaluator
 
-	pl.IsEligiblePreemptor = func(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
+	impl.IsEligiblePreemptor = func(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
 		return true
 	}
 
-	pl.MoreImportantVictim = util.MoreImportantVictim
+	impl.MoreImportantVictim = util.MoreImportantVictim
 
-	pl.SimulatePodScheduling = func(
+	impl.SimulatePodScheduling = func(
 		ctx context.Context,
 		preemptor preemption.Preemptor,
 		domain preemption.Domain,
@@ -126,23 +163,28 @@ func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Fe
 		states := preemptor.CycleStates()
 
 		if len(pods) == 1 && len(nodes) == 1 {
-			return pl.fh.RunFilterPluginsWithNominatedPods(ctx, states[0], pods[0], nodes[0])
+			return impl.fh.RunFilterPluginsWithNominatedPods(ctx, states[0], pods[0], nodes[0])
 		}
 
-		// TODO: Adapt this logic to support PodGroups once Workload Scheduling is implemented. https://github.com/kubernetes/kubernetes/pull/136618
 		return nil
 	}
+
+	pl := DefaultPreemptionPlugin{
+		fh:  fh,
+		fts: fts,
+	}
+	pl.evaluator = fh.PreemptionEvaluator()
 
 	return &pl, nil
 }
 
 // PostFilter invoked at the postFilter extension point.
-func (pl *DefaultPreemption) PostFilter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, m fwk.NodeToStatusReader) (*fwk.PostFilterResult, *fwk.Status) {
+func (pl *DefaultPreemptionPlugin) PostFilter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, m fwk.NodeToStatusReader) (*fwk.PostFilterResult, *fwk.Status) {
 	defer func() {
 		metrics.PreemptionAttempts.Inc()
 	}()
 
-	result, status := pl.Evaluator.Preempt(ctx, state, pod, m)
+	result, status := pl.evaluator.Preempt(ctx, state, pod, m)
 	msg := status.Message()
 	if len(msg) > 0 {
 		return result, fwk.NewStatus(status.Code(), "preemption: "+msg)
@@ -150,11 +192,11 @@ func (pl *DefaultPreemption) PostFilter(ctx context.Context, state fwk.CycleStat
 	return result, status
 }
 
-func (pl *DefaultPreemption) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Status {
+func (pl *DefaultPreemptionPlugin) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Status {
 	if !pl.fts.EnableAsyncPreemption {
 		return nil
 	}
-	if pl.Evaluator.IsPodRunningPreemption(p.GetUID()) {
+	if pl.evaluator.IsPodRunningPreemption(p.GetUID()) {
 		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for the preemption for this pod to be finished")
 	}
 	return nil
@@ -162,7 +204,7 @@ func (pl *DefaultPreemption) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Sta
 
 // EventsToRegister returns the possible events that may make a Pod
 // failed by this plugin schedulable.
-func (pl *DefaultPreemption) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
+func (pl *DefaultPreemptionPlugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
 	if pl.fts.EnableAsyncPreemption {
 		return []fwk.ClusterEventWithHint{
 			// We need to register the event to tell the scheduling queue that the pod could be un-gated after some Pods' deletion.
@@ -182,7 +224,7 @@ func (pl *DefaultPreemption) EventsToRegister(_ context.Context) ([]fwk.ClusterE
 // which failure will be resolved by the preemption.
 // The reason why we return Skip here is that the preemption plugin should not make the decision of when to requeueing Pods,
 // and rather, those plugins should be responsible for that.
-func (pl *DefaultPreemption) isPodSchedulableAfterPodDeletion(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
+func (pl *DefaultPreemptionPlugin) isPodSchedulableAfterPodDeletion(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	return fwk.QueueSkip, nil
 }
 
@@ -190,7 +232,7 @@ func (pl *DefaultPreemption) isPodSchedulableAfterPodDeletion(logger klog.Logger
 // method must produce from dry running based on the constraints given by
 // <minCandidateNodesPercentage> and <minCandidateNodesAbsolute>. The number of
 // candidates returned will never be greater than <numNodes>.
-func (pl *DefaultPreemption) calculateNumCandidates(numNodes int32) int32 {
+func (pl *DefaultPreemptionImpl) calculateNumCandidates(numNodes int32) int32 {
 	n := (numNodes * pl.args.MinCandidateNodesPercentage) / 100
 	if n < pl.args.MinCandidateNodesAbsolute {
 		n = pl.args.MinCandidateNodesAbsolute
@@ -207,13 +249,13 @@ var getOffsetRand = rand.Int31n
 
 // GetOffsetAndNumCandidates chooses a random offset and calculates the number
 // of candidates that should be shortlisted for dry running preemption.
-func (pl *DefaultPreemption) GetOffsetAndNumCandidates(numNodes int32) (int32, int32) {
+func (pl *DefaultPreemptionImpl) GetOffsetAndNumCandidates(numNodes int32) (int32, int32) {
 	return getOffsetRand(numNodes), pl.calculateNumCandidates(numNodes)
 }
 
 // This function is not applicable for out-of-tree preemption plugins that exercise
 // different preemption candidates on the same nominated node.
-func (pl *DefaultPreemption) CandidatesToVictimsMap(candidates []preemption.Candidate) map[string]*extenderv1.Victims {
+func (pl *DefaultPreemptionImpl) CandidatesToVictimsMap(candidates []preemption.Candidate) map[string]*extenderv1.Victims {
 	m := make(map[string]*extenderv1.Victims, len(candidates))
 	for _, c := range candidates {
 		m[c.Name()] = c.Victims()
@@ -221,7 +263,7 @@ func (pl *DefaultPreemption) CandidatesToVictimsMap(candidates []preemption.Cand
 	return m
 }
 
-func (pl *DefaultPreemption) runPreFilterExtensionAddPod(ctx context.Context, preemptor preemption.Preemptor, piToAction fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
+func (pl *DefaultPreemptionImpl) runPreFilterExtensionAddPod(ctx context.Context, preemptor preemption.Preemptor, piToAction fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
 	for i, pod := range preemptor.Members() {
 		status := pl.fh.RunPreFilterExtensionAddPod(ctx, preemptor.CycleStates()[i], pod, piToAction, nodeInfo)
 		if !status.IsSuccess() {
@@ -232,7 +274,7 @@ func (pl *DefaultPreemption) runPreFilterExtensionAddPod(ctx context.Context, pr
 	return nil
 }
 
-func (pl *DefaultPreemption) runPreFilterExtensionRemovePod(ctx context.Context, preemptor preemption.Preemptor, piToAction fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
+func (pl *DefaultPreemptionImpl) runPreFilterExtensionRemovePod(ctx context.Context, preemptor preemption.Preemptor, piToAction fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
 	for i, pod := range preemptor.Members() {
 		status := pl.fh.RunPreFilterExtensionRemovePod(ctx, preemptor.CycleStates()[i], pod, piToAction, nodeInfo)
 		if !status.IsSuccess() {
@@ -243,7 +285,7 @@ func (pl *DefaultPreemption) runPreFilterExtensionRemovePod(ctx context.Context,
 	return nil
 }
 
-func (pl *DefaultPreemption) SelectVictimsOnDomain(
+func (pl *DefaultPreemptionImpl) SelectVictimsOnDomain(
 	ctx context.Context,
 	preemptor preemption.Preemptor,
 	domain preemption.Domain,
@@ -377,7 +419,7 @@ func (pl *DefaultPreemption) SelectVictimsOnDomain(
 //  2. The pod has already preempted other pods and the victims are in their graceful termination period.
 //     Currently we check the node that is nominated for this pod, and as long as there are
 //     terminating pods on this node, we don't attempt to preempt more pods.
-func (pl *DefaultPreemption) PodEligibleToPreemptOthers(_ context.Context, pod *v1.Pod, nominatedNodeStatus *fwk.Status) (bool, string) {
+func (pl *DefaultPreemptionImpl) PodEligibleToPreemptOthers(_ context.Context, pod *v1.Pod, nominatedNodeStatus *fwk.Status) (bool, string) {
 	if pod.Spec.PreemptionPolicy != nil && *pod.Spec.PreemptionPolicy == v1.PreemptNever {
 		return false, "not eligible due to preemptionPolicy=Never."
 	}
@@ -466,19 +508,19 @@ func filterVictimsWithPDBViolation(victims []preemption.PreemptionUnit, pdbs []*
 }
 
 // OrderedScoreFuncs returns a list of ordered score functions to select preferable node where victims will be preempted.
-func (pl *DefaultPreemption) OrderedScoreFuncs(ctx context.Context, nodesToVictims map[string]*extenderv1.Victims) []func(node string) int64 {
+func (pl *DefaultPreemptionImpl) OrderedScoreFuncs(ctx context.Context, nodesToVictims map[string]*extenderv1.Victims) []func(node string) int64 {
 	return nil
 }
 
 // isPreemptionAllowedForDomain returns whether the victim residing on nodeInfo can be preempted by the preemptor
-func (pl *DefaultPreemption) isPreemptionAllowedForDomain(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
+func (pl *DefaultPreemptionImpl) isPreemptionAllowedForDomain(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
 	// The victim must have lower priority than the preemptor, in addition to any filtering implemented by IsEligiblePreemptor
 	return victim.Priority() < preemptor.Priority() && pl.IsEligiblePreemptor(domain, victim, preemptor)
 }
 
 // moreImportantVictim resolves the pods from the PreemptionUnits and delegates to the priorityFunc
 // to determine which victim is more important.
-func (pl *DefaultPreemption) moreImportantVictim(victim1, victim2 preemption.PreemptionUnit, priorityFunc MoreImportantVictimFunc) bool {
+func (pl *DefaultPreemptionImpl) moreImportantVictim(victim1, victim2 preemption.PreemptionUnit, priorityFunc MoreImportantVictimFunc) bool {
 	var pods1 []*v1.Pod
 	var pods2 []*v1.Pod
 	for _, pi := range victim1.Pods() {
