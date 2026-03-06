@@ -25,8 +25,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
@@ -76,7 +74,7 @@ type DefaultPreemption struct {
 	fts       feature.Features
 	args      config.DefaultPreemptionArgs
 	Evaluator *preemption.Evaluator
-	executor  fwk.PreemptionExecutor
+	Executor  fwk.PreemptionExecutor
 
 	IsEligiblePreemptor IsEligiblePreemptorFunc
 
@@ -109,7 +107,7 @@ func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Fe
 		args: *args,
 	}
 	pl.Evaluator = preemption.NewEvaluator(Name, fh, &pl, nil)
-	pl.executor = fh.PreemptionExecutor()
+	pl.Executor = fh.PreemptionExecutor()
 
 	pl.IsEligiblePreemptor = func(domain preemption.Domain, victim preemption.PreemptionUnit, preemptor preemption.Preemptor) bool {
 		return true
@@ -150,7 +148,7 @@ func (pl *DefaultPreemption) PostFilter(ctx context.Context, state fwk.CycleStat
 		v := extenderv1.Victims{
 			Pods: result.Victims,
 		}
-		if status := pl.executor.ActuatePreemption(ctx, result.NominatingInfo.NominatedNodeName, &v, pod, pl.Evaluator.PluginName); !status.IsSuccess() {
+		if status := pl.Executor.ActuatePodPreemption(ctx, result.NominatingInfo.NominatedNodeName, &v, pod, pl.Evaluator.PluginName); !status.IsSuccess() {
 			return nil, status
 		}
 	}
@@ -165,8 +163,11 @@ func (pl *DefaultPreemption) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Sta
 	if !pl.fts.EnableAsyncPreemption {
 		return nil
 	}
-	if pl.executor.IsPodRunningPreemption(p.GetUID()) {
+	if pl.Executor.IsPodRunningPreemption(p.GetUID()) {
 		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for the preemption for this pod to be finished")
+	}
+	if p.Spec.WorkloadRef != nil {
+		// TODO(Argh4k): If the pod is part of a pod group, we should check if the pod group is running preemption.			
 	}
 	return nil
 }
@@ -327,7 +328,7 @@ func (pl *DefaultPreemption) SelectVictimsOnDomain(
 		return pl.moreImportantVictim(potentialVictims[i], potentialVictims[j], pl.MoreImportantVictim)
 	})
 
-	violatingVictims, nonViolatingVictims := filterVictimsWithPDBViolation(potentialVictims, pdbs)
+	violatingVictims, nonViolatingVictims := preemption.FilterVictimsWithPDBViolation(potentialVictims, pdbs)
 	numViolatingVictim := 0
 
 	reprieveVictim := func(v preemption.PreemptionUnit) (bool, error) {
@@ -414,66 +415,6 @@ func (pl *DefaultPreemption) PodEligibleToPreemptOthers(_ context.Context, pod *
 		}
 	}
 	return true, ""
-}
-
-func filterVictimsWithPDBViolation(victims []preemption.PreemptionUnit, pdbs []*policy.PodDisruptionBudget) (violatingVictims, nonViolatingVictims []preemption.PreemptionUnit) {
-	pdbsAllowed := make([]int32, len(pdbs))
-	podIsViolating := func(pod *v1.Pod) bool {
-		if len(pod.Labels) == 0 {
-			return false
-		}
-
-		for i, pdb := range pdbs {
-			if pdb.Namespace != pod.Namespace {
-				continue
-			}
-			selector, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-			if err != nil {
-				// This object has an invalid selector, it does not match the pod
-				continue
-			}
-			// A PDB with a nil or empty selector matches nothing.
-			if selector.Empty() || !selector.Matches(labels.Set(pod.Labels)) {
-				continue
-			}
-
-			// Existing in DisruptedPods means it has been processed in API server,
-			// we don't treat it as a violating case.
-			if _, exist := pdb.Status.DisruptedPods[pod.Name]; exist {
-				continue
-			}
-			// Only decrement the matched pdb when it's not in its <DisruptedPods>;
-			// otherwise we may over-decrement the budget number.
-			pdbsAllowed[i]--
-			// We have found a matching PDB.
-			if pdbsAllowed[i] < 0 {
-				return true
-			}
-		}
-
-		return false
-	}
-
-	for i, pdb := range pdbs {
-		pdbsAllowed[i] = pdb.Status.DisruptionsAllowed
-	}
-
-	for _, victim := range victims {
-		isUnitViolating := false
-
-		for _, pi := range victim.Pods() {
-			if podIsViolating(pi.GetPod()) {
-				isUnitViolating = true
-			}
-		}
-		if isUnitViolating {
-			violatingVictims = append(violatingVictims, victim)
-		} else {
-			nonViolatingVictims = append(nonViolatingVictims, victim)
-		}
-	}
-
-	return violatingVictims, nonViolatingVictims
 }
 
 // OrderedScoreFuncs returns a list of ordered score functions to select preferable node where victims will be preempted.

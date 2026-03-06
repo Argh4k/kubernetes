@@ -24,11 +24,19 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha1 "k8s.io/api/scheduling/v1alpha1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
+	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	fwk "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
+	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 	"k8s.io/utils/ptr"
 )
@@ -215,11 +223,59 @@ func (sched *Scheduler) podGroupCycle(ctx context.Context, schedFwk framework.Fr
 		return
 	}
 
-	result := sched.podGroupSchedulingDefaultAlgorithm(podGroupCycleCtx, schedFwk, podGroupInfo)
+	postFilterMode := runAllPostFilter
+	if utilfeature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+		postFilterMode = runWithoutDefaultPreemption
+	}
+
+	result := sched.podGroupSchedulingDefaultAlgorithm(podGroupCycleCtx, schedFwk, podGroupInfo, postFilterMode)
 	metrics.PodGroupSchedulingAlgorithmLatency.Observe(metrics.SinceInSeconds(start))
+
+	// Run workload aware preemption if required. If the preemption is successful,
+	// we need to put the victims back into the queue.
+	if result.status == podGroupRequiresWorkloadAwarePreemption {
+		status := sched.workloadAwarePreemption(podGroupCycleCtx, result, schedFwk, podGroupInfo)
+		if status.IsSuccess() {
+			result.status = podGroupWaitingOnPreemption
+		} else {
+			result.status = podGroupUnschedulable
+		}
+	}
 
 	// submitPodGroupAlgorithmResult can dispatch binding goroutines, so should be called with the noncancelable ctx.
 	sched.submitPodGroupAlgorithmResult(ctx, schedFwk, podGroupInfo, result, start)
+}
+
+func (sched *Scheduler) workloadAwarePreemption(ctx context.Context, schedRes podGroupAlgorithmResult, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo) *fwk.Status {
+	revertFn := sched.nodeInfoSnapshot.SaveSnapshot()
+	defer revertFn()
+	executor := preemption.NewWorkloadExecutor(fmt.Sprintf("%s-preeemption", podGroupInfo.GetName()), schedFwk, func(ctx context.Context) *fwk.Status {
+		res := sched.podGroupSchedulingDefaultAlgorithm(ctx, schedFwk, podGroupInfo, runWithoutPostFilter)
+		if res.status == podGroupFeasible {
+			return fwk.NewStatus(fwk.Success)
+		}
+		return fwk.NewStatus(fwk.Unschedulable, "pod group is not schedulable")
+	})
+
+	cycleStates := make([]fwk.CycleState, len(schedRes.podResults))
+	for i, podResult := range schedRes.podResults {
+		cycleStates[i] = podResult.podCtx.state
+	}
+
+	status, victims := executor.Preempt(ctx, cycleStates, podGroupInfo.UnscheduledPods)
+
+	if !status.IsSuccess() {
+		return status
+	}
+
+	v := &extenderv1.Victims{
+		Pods: victims,
+	}
+
+	pg := &schedulingv1alpha1.PodGroup{
+		Name: podGroupInfo.GetName(),
+	}
+	return schedFwk.PreemptionExecutor().ActuatePodGroupPreemption(ctx, v, pg, "workload-preemption")
 }
 
 // algorithmResult stores the scheduling result and status for a scheduling attempt of a single pod.
@@ -255,6 +311,24 @@ const (
 	// waiting for resources to be released.
 	// Should be set when the pod group would be feasible, but any member pod requires preemption.
 	podGroupWaitingOnPreemption podGroupAlgorithmStatus = "waiting_on_preemption"
+	// podGroupRequiresWorkloadAwarePreemption means that the pod group requires workload aware preemption
+	// Should be set when the pod group is not feasible, but workload aware preemption is enabled.
+	podGroupRequiresWorkloadAwarePreemption podGroupAlgorithmStatus = "requires_workload_aware_preemption"
+)
+
+type podGroupPostFilterMode int
+
+const (
+	// The pod group algorithm should try to run default post filter in pod by pod cycle.
+	runAllPostFilter podGroupPostFilterMode = iota
+	// The pod group algorithm should not try post filter at all. This is can be used
+	// by workload aware preemption that tries to check if after removing some
+	// pods the pod group can be scheduled.
+	runWithoutPostFilter
+	// The pod group algorithm should return post filter without running default
+	// preemption. This mode is expected when workload aware preemption
+	// is enabled.
+	runWithoutDefaultPreemption
 )
 
 // podGroupAlgorithmResult stores the scheduling pod scheduling results for a pod group
@@ -270,7 +344,7 @@ type podGroupAlgorithmResult struct {
 // It tries to schedule each pod using standard filtering and scoring logic in a fixed order.
 // If a pod requires preemption to be schedulable, subsequent pods in the algorithm
 // treat that pod as already scheduled on that node with victims being already removed in memory.
-func (sched *Scheduler) podGroupSchedulingDefaultAlgorithm(ctx context.Context, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo) podGroupAlgorithmResult {
+func (sched *Scheduler) podGroupSchedulingDefaultAlgorithm(ctx context.Context, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo, postFilterMode podGroupPostFilterMode) podGroupAlgorithmResult {
 	result := podGroupAlgorithmResult{
 		podResults: make([]algorithmResult, 0, len(podGroupInfo.QueuedPodInfos)),
 		status:     podGroupUnschedulable,
@@ -281,7 +355,7 @@ func (sched *Scheduler) podGroupSchedulingDefaultAlgorithm(ctx context.Context, 
 
 	requiresPreemption := false
 	for _, podInfo := range podGroupInfo.QueuedPodInfos {
-		podResult, revertFn := sched.podGroupPodSchedulingAlgorithm(ctx, schedFwk, podGroupInfo, podInfo)
+		podResult, revertFn := sched.podGroupPodSchedulingAlgorithm(ctx, schedFwk, podGroupInfo, podInfo, postFilterMode)
 		result.podResults = append(result.podResults, podResult)
 		if !podResult.status.IsSuccess() && !podResult.requiresPreemption {
 			// When a pod is not feasible and doesn't require preemption, it means that it failed scheduling.
@@ -304,12 +378,17 @@ func (sched *Scheduler) podGroupSchedulingDefaultAlgorithm(ctx context.Context, 
 		}
 	}
 
+	// If the pod group is unschedulable and workload aware preemption is enabled, we need to run workload aware preemption.
+	if result.status == podGroupUnschedulable && utilfeature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+		result.status = podGroupRequiresWorkloadAwarePreemption
+	}
+
 	return result
 }
 
 // podGroupPodSchedulingAlgorithm runs a scheduling algorithm for individual pod from a pod group.
 // It returns the algorithm result and, if successful or the preemption is required, the permit status together with the revert function.
-func (sched *Scheduler) podGroupPodSchedulingAlgorithm(ctx context.Context, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo, podInfo *framework.QueuedPodInfo) (algorithmResult, func()) {
+func (sched *Scheduler) podGroupPodSchedulingAlgorithm(ctx context.Context, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo, podInfo *framework.QueuedPodInfo, postFilterMode podGroupPostFilterMode) (algorithmResult, func()) {
 	pod := podInfo.Pod
 	podCtx := sched.initPodSchedulingContext(ctx, pod)
 	logger := podCtx.logger
@@ -317,6 +396,17 @@ func (sched *Scheduler) podGroupPodSchedulingAlgorithm(ctx context.Context, sche
 	start := time.Now()
 
 	logger.V(4).Info("Attempting to schedule a pod belonging to a pod group", "podGroup", klog.KObj(podGroupInfo), "pod", klog.KObj(pod))
+
+	switch postFilterMode {
+	case runWithoutPostFilter:
+		podCtx.state.SetSkipAllPostFilterPlugins(true)
+	case runWithoutDefaultPreemption:
+		skipPostFilterPlugins := podCtx.state.GetSkipPostFilterPlugins()
+		if skipPostFilterPlugins == nil {
+			skipPostFilterPlugins = sets.Set[string]{}
+		}
+		podCtx.state.SetSkipPostFilterPlugins(skipPostFilterPlugins.Insert(names.DefaultPreemption))
+	}
 
 	requiresPreemption := false
 	scheduleResult, status := sched.schedulingAlgorithm(ctx, podCtx.state, schedFwk, podInfo, start)

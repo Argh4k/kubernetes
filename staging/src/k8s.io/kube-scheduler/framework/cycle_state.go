@@ -64,6 +64,14 @@ type CycleState interface {
 	GetSkipPreBindPlugins() sets.Set[string]
 	// SetSkipPreBindPlugins sets plugins that should be skipped in the PerBind extension point.
 	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
+	SetSkipAllPostFilterPlugins(flag bool)
+	GetSkipAllPostFilterPlugins() bool
+	SetSkipPostFilterPlugins(plugins sets.Set[string])
+	// GetSkipPostFilterPlugins returns plugins that will be skipped in the PostFilter extension point.
+	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
+	GetSkipPostFilterPlugins() sets.Set[string]
+	// SetSkipPostFilterPlugins sets plugins that should be skipped in the PostFilter extension point.
+	// This function is mostly for the scheduling framework runtime, plugins usually don't have to use it.
 	SetSkipPreBindPlugins(plugins sets.Set[string])
 	// GetParallelPreBindPlugins returns plugins that can be run in parallel with other plugins
 	// in the PreBind extension point.

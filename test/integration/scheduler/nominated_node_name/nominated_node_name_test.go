@@ -491,8 +491,9 @@ func TestPreemptionAndNominatedNodeNameScenarios(t *testing.T) {
 							return nil, fmt.Errorf("unexpected plugin type %T", p)
 						}
 
-						preemptPodFn := preemptionPlugin.Evaluator.PreemptPod
-						preemptionPlugin.Evaluator.PreemptPod = func(ctx context.Context, c preemption.Candidate, preemptor, victim *v1.Pod, pluginName string) error {
+						executor := preemptionPlugin.Executor.(*preemption.Executor)
+						preemptPodFn := executor.PreemptPod
+						executor.PreemptPod = func(ctx context.Context, c preemption.Candidate, preemptor, victim *v1.Pod, pluginName string) error {
 							// block the preemption goroutine to complete until the test case allows it to proceed.
 							lock.Lock()
 							ch, ok := preemptionDoneChannels[preemptor.Name]

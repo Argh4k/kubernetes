@@ -25,6 +25,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -78,6 +79,38 @@ func NewEvaluator(pluginName string, fh fwk.Handle, i Interface, e fwk.Preemptio
 		Interface:  i,
 		executor:   e,
 	}
+}
+
+// WorkloadAwarePreemption implements the preemption logic where the preemptor is a pod group
+// and the domain is the whole cluster. It returns a status together with the list of victims
+// that should be preempted in order to make enough room for the pod group to be scheduled.
+func (ev *Evaluator) WorkloadAwarePreemption(ctx context.Context, states []fwk.CycleState, podGroup []*v1.Pod) (*fwk.Status, []*v1.Pod) {
+	// logger := klog.FromContext(ctx)
+
+	// 0) Ensure the pod group is eligible to preempt other pods.
+	// if ok, msg := ev.PodGroupEligibleToPreemptOthers(ctx, podGroup); !ok {
+	// 	logger.V(5).Info("PodGroup is not eligible for preemption", "podGroup", klog.KObj(podGroup), "reason", msg)
+	// 	return fwk.NewStatus(fwk.Unschedulable, msg)
+	// }
+
+	// In case of workload-aware preemption, the domain is whole cluster.
+	// We do not make a snapshot of node info. Those nodes will be shared
+	// with the PodGroup scheduling algorithm
+	allNodes, err := ev.Handler.SnapshotSharedLister().NodeInfos().List()
+	if err != nil {
+		return fwk.AsStatus(err), nil
+	}
+	domain := NewDomainForWorkloadPreemption(allNodes, "cluster-domain")
+
+	preemptor := NewPodGroupPreemptor(podGroup, states)
+	pdbs, err := getPodDisruptionBudgets(ev.PdbLister)
+	if err != nil {
+		return fwk.AsStatus(err), nil
+	}
+
+	victims, _, _ := ev.SelectVictimsOnDomain(ctx, preemptor, domain, pdbs)
+
+	return fwk.NewStatus(fwk.Success), victims
 }
 
 // Preempt returns a PostFilterResult carrying suggested nominatedNodeName, along with a Status.
@@ -147,7 +180,7 @@ func (ev *Evaluator) Preempt(ctx context.Context, state fwk.CycleState, pod *v1.
 	}
 
 	// 3) Interact with registered Extenders to filter out some candidates if needed.
-	candidates, status := ev.callExtenders(logger, pod, candidates)
+	candidates, status := ev.CallExtenders(logger, pod, candidates)
 	if !status.IsSuccess() {
 		return nil, status
 	}
@@ -162,7 +195,7 @@ func (ev *Evaluator) Preempt(ctx context.Context, state fwk.CycleState, pod *v1.
 
 	// 5) Actuate the preemption if executor is set.
 	if ev.executor != nil {
-		if status := ev.executor.ActuatePreemption(ctx, bestCandidate.Name(), bestCandidate.Victims(), pod, ev.PluginName); !status.IsSuccess() {
+		if status := ev.executor.ActuatePodPreemption(ctx, bestCandidate.Name(), bestCandidate.Victims(), pod, ev.PluginName); !status.IsSuccess() {
 			return nil, status
 		}
 	}
@@ -196,11 +229,11 @@ func (ev *Evaluator) findCandidates(ctx context.Context, state fwk.CycleState, a
 	return ev.DryRunPreemption(ctx, state, pod, potentialNodes, pdbs, offset, candidatesNum)
 }
 
-// callExtenders calls given <extenders> to select the list of feasible candidates.
+// CallExtenders calls given <extenders> to select the list of feasible candidates.
 // We will only check <candidates> with extenders that support preemption.
 // Extenders which do not support preemption may later prevent preemptor from being scheduled on the nominated
 // node. In that case, scheduler will find a different host for the preemptor in subsequent scheduling cycles.
-func (ev *Evaluator) callExtenders(logger klog.Logger, pod *v1.Pod, candidates []Candidate) ([]Candidate, *fwk.Status) {
+func (ev *Evaluator) CallExtenders(logger klog.Logger, pod *v1.Pod, candidates []Candidate) ([]Candidate, *fwk.Status) {
 	extenders := ev.Handler.Extenders()
 	nodeLister := ev.Handler.SnapshotSharedLister().NodeInfos()
 	if len(extenders) == 0 {
@@ -456,4 +489,65 @@ func (ev *Evaluator) DryRunPreemption(ctx context.Context, state fwk.CycleState,
 	}
 	fh.Parallelizer().Until(ctx, len(potentialNodes), checkNode, ev.PluginName)
 	return append(nonViolatingCandidates.get(), violatingCandidates.get()...), nodeStatuses, utilerrors.NewAggregate(errs)
+}
+
+// FilterVictimsWithPDBViolation filters victims into two groups: violating and non-violating pod disruption budget.
+func FilterVictimsWithPDBViolation(victims []PreemptionUnit, pdbs []*policy.PodDisruptionBudget) (violatingVictims, nonViolatingVictims []PreemptionUnit) {
+	pdbsAllowed := make([]int32, len(pdbs))
+	podIsViolating := func(pod *v1.Pod) bool {
+		if len(pod.Labels) == 0 {
+			return false
+		}
+
+		for i, pdb := range pdbs {
+			if pdb.Namespace != pod.Namespace {
+				continue
+			}
+			selector, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
+			if err != nil {
+				// This object has an invalid selector, it does not match the pod
+				continue
+			}
+			// A PDB with a nil or empty selector matches nothing.
+			if selector.Empty() || !selector.Matches(labels.Set(pod.Labels)) {
+				continue
+			}
+
+			// Existing in DisruptedPods means it has been processed in API server,
+			// we don't treat it as a violating case.
+			if _, exist := pdb.Status.DisruptedPods[pod.Name]; exist {
+				continue
+			}
+			// Only decrement the matched pdb when it's not in its <DisruptedPods>;
+			// otherwise we may over-decrement the budget number.
+			pdbsAllowed[i]--
+			// We have found a matching PDB.
+			if pdbsAllowed[i] < 0 {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	for i, pdb := range pdbs {
+		pdbsAllowed[i] = pdb.Status.DisruptionsAllowed
+	}
+
+	for _, victim := range victims {
+		isUnitViolating := false
+
+		for _, pi := range victim.Pods() {
+			if podIsViolating(pi.GetPod()) {
+				isUnitViolating = true
+			}
+		}
+		if isUnitViolating {
+			violatingVictims = append(violatingVictims, victim)
+		} else {
+			nonViolatingVictims = append(nonViolatingVictims, victim)
+		}
+	}
+
+	return violatingVictims, nonViolatingVictims
 }

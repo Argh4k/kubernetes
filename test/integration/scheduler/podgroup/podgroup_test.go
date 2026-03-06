@@ -71,6 +71,15 @@ func TestPodGroupScheduling(t *testing.T) {
 	lowPriorityBlockerPod := st.MakePod().Name("low-priority-blocker").Req(map[v1.ResourceName]string{v1.ResourceCPU: "2"}).Container("image").
 		ZeroTerminationGracePeriod().Priority(10).Obj()
 
+	lowP1 := st.MakePod().Name("low-p1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").
+		ZeroTerminationGracePeriod().Priority(10).Obj()
+	lowP2 := st.MakePod().Name("low-p2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").
+		ZeroTerminationGracePeriod().Priority(10).Obj()
+	lowP3 := st.MakePod().Name("low-p3").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").
+		ZeroTerminationGracePeriod().Priority(10).Obj()
+	lowP4 := st.MakePod().Name("low-p4").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").
+		ZeroTerminationGracePeriod().Priority(10).Obj()
+
 	otherP1 := st.MakePod().Name("other-p1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").
 		WorkloadRef(&v1.WorkloadReference{Name: "other-workload", PodGroup: "pg"}).Priority(100).Obj()
 	otherP2 := st.MakePod().Name("other-p2").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").
@@ -97,8 +106,9 @@ func TestPodGroupScheduling(t *testing.T) {
 	}
 
 	tests := []struct {
-		name  string
-		steps []step
+		name                          string
+		enableWorkloadAwarePreemption bool
+		steps                         []step
 	}{
 		{
 			name: "gang schedules when workload and resources are available",
@@ -382,14 +392,44 @@ func TestPodGroupScheduling(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:                          "gang schedules with workload-aware preemption",
+			enableWorkloadAwarePreemption: true,
+			steps: []step{
+				{
+					name:       "Create low priority pods that take up all node resources",
+					createPods: []*v1.Pod{lowP1, lowP2, lowP3, lowP4},
+				},
+				{
+					name:                 "Wait for all low priority pods to be scheduled",
+					waitForPodsScheduled: []string{"low-p1", "low-p2", "low-p3", "low-p4"},
+				},
+				{
+					name:           "Create the Workload object",
+					createWorkload: gangWorkload,
+				},
+				{
+					name:       "Create high priority gang pods",
+					createPods: []*v1.Pod{p1, p2, p3, p4},
+				},
+				{
+					name:                 "Verify all gang pods are scheduled successfully (after workload-aware preemption)",
+					waitForPodsScheduled: []string{"p1", "p2", "p3", "p4"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+			featureOverrides := featuregatetesting.FeatureOverrides{
 				features.GenericWorkload: true,
 				features.GangScheduling:  true,
-			})
+			}
+			if tt.enableWorkloadAwarePreemption {
+				featureOverrides[features.WorkloadAwarePreemption] = true
+			}
+			featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featureOverrides)
 
 			workloadmanager.DefaultSchedulingTimeoutDuration = 5 * time.Second
 

@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"         //nolint:depguard
 	"github.com/google/go-cmp/cmp/cmpopts" //nolint:depguard
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha1 "k8s.io/api/scheduling/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
@@ -874,11 +875,16 @@ type PluginsRunner interface {
 // PreemptionExecutor knows how to perform preemption of victims for selected Pods. It also keeps track
 // of all in progress preemption operations.
 type PreemptionExecutor interface {
-	// ActuatePreemption actuates the preemption given preemptorPod to be scheduled on targetNode and a list of 
+	// ActuatePodPreemption actuates the preemption given preemptorPod to be scheduled on targetNode and a list of
 	// victims to be evicted.
 	// Preemption can happen asynchronously in which case the preemption can be tracked via IsPodRunningPreemption method.
-	ActuatePreemption(ctx context.Context, targetNode string, victims *extenderv1.Victims, preemptorPod *v1.Pod, source string) *Status
+	ActuatePodPreemption(ctx context.Context, targetNode string, victims *extenderv1.Victims, preemptorPod *v1.Pod, source string) *Status
+
+	ActuatePodGroupPreemption(ctx context.Context, victims *extenderv1.Victims, preemptor *schedulingv1alpha1.PodGroup, preemptorPods []*v1.Pod, pluginName string) *Status
 
 	// IsPodRunningPreemption returns true if the pod is currently triggering preemption asynchronously.
 	IsPodRunningPreemption(podUID types.UID) bool
+
+	// IsPodGroupRunningPreemption returns true if the pod group is currently triggering preemption asynchronously.
+	IsPodGroupRunningPreemption(podGroupUID types.UID) bool
 }

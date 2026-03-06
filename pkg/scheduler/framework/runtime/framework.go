@@ -1123,15 +1123,24 @@ func (f *frameworkImpl) RunPostFilterPlugins(ctx context.Context, state fwk.Cycl
 		logger = klog.LoggerWithName(logger, "PostFilter")
 	}
 
+	if state.GetSkipAllPostFilterPlugins() {
+		return nil, fwk.NewStatus(fwk.Unschedulable, "All PostFilter plugins are skipped")
+	}
+
 	// `result` records the last meaningful(non-noop) PostFilterResult.
 	var result *fwk.PostFilterResult
 	var reasons []string
 	var rejectorPlugin string
+	skippedPlugins := state.GetSkipPostFilterPlugins()
+
 	for _, pl := range f.postFilterPlugins {
 		ctx := ctx
 		if verboseLogs {
 			logger := klog.LoggerWithName(logger, pl.Name())
 			ctx = klog.NewContext(ctx, logger)
+		}
+		if skippedPlugins.Has(pl.Name()) {
+			continue
 		}
 		r, s := f.runPostFilterPlugin(ctx, pl, state, pod, filteredNodeStatusMap)
 		if s.IsSuccess() {

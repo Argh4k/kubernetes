@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package preemption
+package preemption_test
 
 import (
 	"context"
@@ -42,6 +42,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework/parallelize"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort"
+	"k8s.io/kubernetes/pkg/scheduler/framework/preemption"
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
@@ -65,7 +66,7 @@ type FakePostFilterPlugin struct {
 	numViolatingVictim int
 }
 
-func (pl *FakePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
+func (pl *FakePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor preemption.Preemptor, domain preemption.Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
 	for _, node := range domain.Nodes() {
 		victims = append(victims, node.GetPods()[0].GetPod())
 	}
@@ -76,7 +77,7 @@ func (pl *FakePostFilterPlugin) GetOffsetAndNumCandidates(nodes int32) (int32, i
 	return 0, nodes
 }
 
-func (pl *FakePostFilterPlugin) CandidatesToVictimsMap(candidates []Candidate) map[string]*extenderv1.Victims {
+func (pl *FakePostFilterPlugin) CandidatesToVictimsMap(candidates []preemption.Candidate) map[string]*extenderv1.Victims {
 	return nil
 }
 
@@ -94,7 +95,7 @@ func (pl *FakePostFilterPlugin) OrderedScoreFuncs(ctx context.Context, nodesToVi
 
 type FakePreemptionScorePostFilterPlugin struct{}
 
-func (pl *FakePreemptionScorePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor Preemptor, domain Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
+func (pl *FakePreemptionScorePostFilterPlugin) SelectVictimsOnDomain(ctx context.Context, preemptor preemption.Preemptor, domain preemption.Domain, pdbs []*policy.PodDisruptionBudget) (victims []*v1.Pod, numViolatingVictim int, status *fwk.Status) {
 	for _, node := range domain.Nodes() {
 		victims = append(victims, node.GetPods()[0].GetPod())
 	}
@@ -105,7 +106,7 @@ func (pl *FakePreemptionScorePostFilterPlugin) GetOffsetAndNumCandidates(nodes i
 	return 0, nodes
 }
 
-func (pl *FakePreemptionScorePostFilterPlugin) CandidatesToVictimsMap(candidates []Candidate) map[string]*extenderv1.Victims {
+func (pl *FakePreemptionScorePostFilterPlugin) CandidatesToVictimsMap(candidates []preemption.Candidate) map[string]*extenderv1.Victims {
 	m := make(map[string]*extenderv1.Victims, len(candidates))
 	for _, c := range candidates {
 		m[c.Name()] = c.Victims()
@@ -141,7 +142,7 @@ func TestDryRunPreemption(t *testing.T) {
 		preemptors         []*v1.Pod
 		initPods           []*v1.Pod
 		numViolatingVictim int
-		expected           [][]Candidate
+		expected           [][]preemption.Candidate
 	}{
 		{
 			name: "no pdb violation",
@@ -156,15 +157,15 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj(),
 				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj(),
 			},
-			expected: [][]Candidate{
+			expected: [][]preemption.Candidate{
 				{
-					&candidate{
+					&mockCandidate{
 						victims: &extenderv1.Victims{
 							Pods: []*v1.Pod{st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj()},
 						},
 						name: "node1",
 					},
-					&candidate{
+					&mockCandidate{
 						victims: &extenderv1.Victims{
 							Pods: []*v1.Pod{st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj()},
 						},
@@ -187,16 +188,16 @@ func TestDryRunPreemption(t *testing.T) {
 				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj(),
 			},
 			numViolatingVictim: 1,
-			expected: [][]Candidate{
+			expected: [][]preemption.Candidate{
 				{
-					&candidate{
+					&mockCandidate{
 						victims: &extenderv1.Victims{
 							Pods:             []*v1.Pod{st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj()},
 							NumPDBViolations: 1,
 						},
 						name: "node1",
 					},
-					&candidate{
+					&mockCandidate{
 						victims: &extenderv1.Victims{
 							Pods:             []*v1.Pod{st.MakePod().Name("p2").UID("p2").Node("node2").Priority(midPriority).Obj()},
 							NumPDBViolations: 1,
@@ -256,13 +257,13 @@ func TestDryRunPreemption(t *testing.T) {
 
 			for cycle, preemptor := range tt.preemptors {
 				state := framework.NewCycleState()
-				pe := Evaluator{
+				pe := preemption.Evaluator{
 					PluginName: "FakePostFilter",
 					Handler:    fwk,
 					Interface:  fakePostPlugin,
 				}
 				got, _, _ := pe.DryRunPreemption(ctx, state, preemptor, nodeInfos, nil, 0, int32(len(nodeInfos)))
-				// Sort the values (inner victims) and the candidate itself (by its NominatedNodeName).
+				// Sort the values (inner victims) and the mockCandidate itself (by its NominatedNodeName).
 				for i := range got {
 					victims := got[i].Victims().Pods
 					sort.Slice(victims, func(i, j int) bool {
@@ -272,7 +273,12 @@ func TestDryRunPreemption(t *testing.T) {
 				sort.Slice(got, func(i, j int) bool {
 					return got[i].Name() < got[j].Name()
 				})
-				if diff := cmp.Diff(tt.expected[cycle], got, cmp.AllowUnexported(candidate{})); diff != "" {
+
+				var mockGot []preemption.Candidate
+				for _, c := range got {
+					mockGot = append(mockGot, &mockCandidate{victims: c.Victims(), name: c.Name()})
+				}
+				if diff := cmp.Diff(tt.expected[cycle], mockGot, cmp.AllowUnexported(mockCandidate{})); diff != "" {
 					t.Errorf("cycle %d: unexpected candidates (-want, +got): %s", cycle, diff)
 				}
 			}
@@ -356,7 +362,7 @@ func TestSelectCandidate(t *testing.T) {
 
 			for _, pod := range tt.testPods {
 				state := framework.NewCycleState()
-				pe := Evaluator{
+				pe := preemption.Evaluator{
 					PluginName: "FakePreemptionScorePostFilter",
 					Handler:    fwk,
 					Interface:  fakePreemptionScorePostFilterPlugin,
@@ -364,7 +370,7 @@ func TestSelectCandidate(t *testing.T) {
 				candidates, _, _ := pe.DryRunPreemption(ctx, state, pod, nodeInfos, nil, 0, int32(len(nodeInfos)))
 				s := pe.SelectCandidate(ctx, candidates)
 				if s == nil || len(s.Name()) == 0 {
-					t.Errorf("expect any node in %v, but no candidate selected", tt.expected)
+					t.Errorf("expect any node in %v, but no mockCandidate selected", tt.expected)
 					return
 				}
 				if diff := cmp.Diff(tt.expected, s.Name()); diff != "" {
@@ -478,9 +484,9 @@ func TestCallExtenders(t *testing.T) {
 			Node(node1Name).SchedulerName(defaultSchedulerName).Priority(midPriority).
 			Containers([]v1.Container{st.MakeContainer().Name("container1").Obj()}).
 			Obj()
-		makeCandidates = func(nodeName string, pods ...*v1.Pod) []Candidate {
-			return []Candidate{
-				&candidate{
+		makeCandidates = func(nodeName string, pods ...*v1.Pod) []preemption.Candidate {
+			return []preemption.Candidate{
+				&mockCandidate{
 					name: nodeName,
 					victims: &extenderv1.Victims{
 						Pods: pods,
@@ -492,9 +498,9 @@ func TestCallExtenders(t *testing.T) {
 	tests := []struct {
 		name           string
 		extenders      []fwk.Extender
-		candidates     []Candidate
+		candidates     []preemption.Candidate
 		wantStatus     *fwk.Status
-		wantCandidates []Candidate
+		wantCandidates []preemption.Candidate
 	}{
 		{
 			name:           "no extenders",
@@ -519,7 +525,7 @@ func TestCallExtenders(t *testing.T) {
 			},
 			candidates:     makeCandidates(node1Name, victim),
 			wantStatus:     fwk.AsStatus(fmt.Errorf("expected at least one victim pod on node %q", node1Name)),
-			wantCandidates: []Candidate{},
+			wantCandidates: []preemption.Candidate{},
 		},
 		{
 			name: "one extender does not support preemption",
@@ -538,7 +544,7 @@ func TestCallExtenders(t *testing.T) {
 			},
 			candidates:     makeCandidates(node1Name, victim),
 			wantStatus:     nil,
-			wantCandidates: []Candidate{},
+			wantCandidates: []preemption.Candidate{},
 		},
 		{
 			name: "one extender returns error and is ignorable",
@@ -565,9 +571,9 @@ func TestCallExtenders(t *testing.T) {
 			extenders: []fwk.Extender{
 				newFakeExtender().WithSupportsPreemption(true),
 			},
-			candidates:     []Candidate{},
+			candidates:     []preemption.Candidate{},
 			wantStatus:     nil,
-			wantCandidates: []Candidate{},
+			wantCandidates: []preemption.Candidate{},
 		},
 	}
 
@@ -614,12 +620,12 @@ func TestCallExtenders(t *testing.T) {
 			fwk.SetAPICacher(apicache.New(nil, cache))
 
 			fakePreemptionScorePostFilterPlugin := &FakePreemptionScorePostFilterPlugin{}
-			pe := Evaluator{
+			pe := preemption.Evaluator{
 				PluginName: "FakePreemptionScorePostFilter",
 				Handler:    fwk,
 				Interface:  fakePreemptionScorePostFilterPlugin,
 			}
-			gotCandidates, status := pe.callExtenders(logger, preemptor, tt.candidates)
+			gotCandidates, status := pe.CallExtenders(logger, preemptor, tt.candidates)
 			if (tt.wantStatus == nil) != (status == nil) || status.Code() != tt.wantStatus.Code() {
 				t.Errorf("callExtenders() status mismatch. got: %v, want: %v", status, tt.wantStatus)
 			}
