@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/listers/scheduling/v1alpha2"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
@@ -62,11 +63,11 @@ type MoreImportantVictimFunc func(victim1, victim2 preemption.Victim) bool
 
 // DefaultPreemption is a PostFilter plugin implements the preemption logic.
 type DefaultPreemption struct {
-	fh   fwk.Handle
-	fts  feature.Features
-	args config.DefaultPreemptionArgs
-
+	fh        fwk.Handle
+	fts       feature.Features
+	args      config.DefaultPreemptionArgs
 	Evaluator *preemption.Evaluator
+	pgLister  v1alpha2.PodGroupLister
 
 	// IsEligiblePod returns whether a victim (single pod/podGroup) is allowed to be preempted by a preemptor pod.
 	// This filtering is in addition to the internal requirement that the victim pod have lower
@@ -101,6 +102,10 @@ func New(_ context.Context, dpArgs runtime.Object, fh fwk.Handle, fts feature.Fe
 		args: *args,
 	}
 	pl.Evaluator = preemption.NewEvaluator(Name, fh, &pl)
+
+	if pl.fts.EnableWorkloadAwarePreemption {
+		pl.pgLister = fh.SharedInformerFactory().Scheduling().V1alpha2().PodGroups().Lister()
+	}
 
 	// Default behavior: No additional filtering, beyond the internal requirement that the victim
 	// have lower priority than the preemptor.
@@ -140,6 +145,20 @@ func (pl *DefaultPreemption) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Sta
 	if executor == nil {
 		return nil
 	}
+	if p.Spec.SchedulingGroup != nil && pl.fts.EnableWorkloadAwarePreemption {
+		pg, err := pl.pgLister.PodGroups(p.Namespace).Get(*p.Spec.SchedulingGroup.PodGroupName)
+		// If the pg is not found do not block the pod. It's not a default preemption responsibility
+		// to block pods from pod group without pg from entering the queue.
+		if err != nil || pg == nil {
+			logger := klog.FromContext(ctx)
+			logger.V(5).Info("PodGroup not found", "namespace", p.Namespace, "podGroupName", *p.Spec.SchedulingGroup.PodGroupName)
+			return nil
+		}
+		if executor.IsPodGroupRunningPreemption(pg.GetUID()) {
+			return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for the preemption for this pod group to be finished")
+		}
+	}
+
 	if executor.IsPodRunningPreemption(p.GetUID()) {
 		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for the preemption for this pod to be finished")
 	}
