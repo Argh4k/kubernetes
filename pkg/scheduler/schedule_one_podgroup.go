@@ -275,7 +275,7 @@ func (sched *Scheduler) workloadAwarePreemption(ctx context.Context, schedRes po
 	pg := &schedulingv1alpha1.PodGroup{
 		Name: podGroupInfo.GetName(),
 	}
-	return schedFwk.PreemptionExecutor().ActuatePodGroupPreemption(ctx, v, pg, "workload-preemption")
+	return schedFwk.PreemptionExecutor().ActuatePodGroupPreemption(ctx, v, pg, podGroupInfo.UnscheduledPods, "workload-preemption" )
 }
 
 // algorithmResult stores the scheduling result and status for a scheduling attempt of a single pod.
