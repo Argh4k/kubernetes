@@ -25,8 +25,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/listers/scheduling/v1alpha2"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
@@ -327,7 +325,7 @@ func (pl *DefaultPreemption) SelectVictimsOnDomain(
 	// Try to reprieve as many pods as possible. We first try to reprieve the PDB
 	// violating victims and then other non-violating ones. In both cases, we start
 	// from the highest importance victims.
-	violatingVictims, nonViolatingVictims := filterVictimsWithPDBViolation(potentialVictims, pdbs)
+	violatingVictims, nonViolatingVictims := preemption.FilterVictimsWithPDBViolation(potentialVictims, pdbs)
 	numViolatingVictim := 0
 	var victims []preemption.Victim
 	reprieveVictim := func(v preemption.Victim) (bool, error) {
@@ -427,71 +425,6 @@ func (pl *DefaultPreemption) PodEligibleToPreemptOthers(_ context.Context, pod *
 func (pl *DefaultPreemption) isPreemptionAllowed(nodeInfo fwk.NodeInfo, victim preemption.Victim, pod *v1.Pod) bool {
 	// The victim must have lower priority than the pod, in addition to any filtering implemented by IsEligiblePod
 	return victim.Priority() < corev1helpers.PodPriority(pod) && pl.IsEligiblePod(nodeInfo, victim, pod)
-}
-
-// filterVictimsWithPDBViolation groups the given "victims" into two groups of "violatingVictims"
-// and "nonViolatingVictims" based on whether their PDBs will be violated if they are
-// preempted.
-// This function is stable and does not change the order of received victims. So, if it
-// receives a sorted list, grouping will preserve the order of the input list.
-func filterVictimsWithPDBViolation(victims []preemption.Victim, pdbs []*policy.PodDisruptionBudget) (violatingVictims, nonViolatingVictims []preemption.Victim) {
-	pdbsAllowed := make([]int32, len(pdbs))
-	podIsViolating := func(pod *v1.Pod) bool {
-		if len(pod.Labels) == 0 {
-			return false
-		}
-
-		for i, pdb := range pdbs {
-			if pdb.Namespace != pod.Namespace {
-				continue
-			}
-			selector, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-			if err != nil {
-				// This object has an invalid selector, it does not match the pod
-				continue
-			}
-			// A PDB with a nil or empty selector matches nothing.
-			if selector.Empty() || !selector.Matches(labels.Set(pod.Labels)) {
-				continue
-			}
-
-			// Existing in DisruptedPods means it has been processed in API server,
-			// we don't treat it as a violating case.
-			if _, exist := pdb.Status.DisruptedPods[pod.Name]; exist {
-				continue
-			}
-			// Only decrement the matched pdb when it's not in its <DisruptedPods>;
-			// otherwise we may over-decrement the budget number.
-			pdbsAllowed[i]--
-			// We have found a matching PDB.
-			if pdbsAllowed[i] < 0 {
-				return true
-			}
-		}
-
-		return false
-	}
-
-	for i, pdb := range pdbs {
-		pdbsAllowed[i] = pdb.Status.DisruptionsAllowed
-	}
-
-	for _, victim := range victims {
-		isUnitViolating := false
-
-		for _, pi := range victim.Pods() {
-			if podIsViolating(pi.GetPod()) {
-				isUnitViolating = true
-			}
-		}
-		if isUnitViolating {
-			violatingVictims = append(violatingVictims, victim)
-		} else {
-			nonViolatingVictims = append(nonViolatingVictims, victim)
-		}
-	}
-
-	return violatingVictims, nonViolatingVictims
 }
 
 // OrderedScoreFuncs returns a list of ordered score functions to select preferable node where victims will be preempted.
