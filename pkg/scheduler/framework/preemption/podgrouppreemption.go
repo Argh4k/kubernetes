@@ -18,6 +18,7 @@ package preemption
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 
@@ -28,6 +29,7 @@ import (
 	policylisters "k8s.io/client-go/listers/policy/v1"
 
 	"k8s.io/klog/v2"
+	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	fwk "k8s.io/kube-scheduler/framework"
 )
 
@@ -59,24 +61,22 @@ func NewPodGroupEvaluator(fh fwk.Handle, podGroupSchedulingFunc func(context.Con
 // The preemption logic actuates the NodeInfo provided by a Handler
 // The caller is expected to backup the NodeInfo before calling this function
 // And rollback the state to the backup after function is finished.
-func (ev *PodGroupEvaluator) Preempt(ctx context.Context, pg *schedulingapi.PodGroup, pods []*v1.Pod) (*fwk.Status, []*v1.Pod) {
+func (ev *PodGroupEvaluator) Preempt(ctx context.Context, pg *schedulingapi.PodGroup, pods []*v1.Pod) *fwk.Status {
 	// In case of workload-aware preemption, the domain is whole cluster.
 	// We do not make a snapshot of node info. Those nodes will be shared
 	// with the PodGroup scheduling algorithm passed as podGroupSchedulingFunc.
 	allNodes, err := ev.Handler.SnapshotSharedLister().NodeInfos().List()
 	if err != nil {
-		return fwk.AsStatus(err), nil
+		return fwk.AsStatus(err)
 	}
 	domain := NewDomainForWorkloadPreemption(allNodes, "cluster-domain")
 	preemptor := NewPodGroupPreemptor(pg, pods)
 	pdbs, err := getPodDisruptionBudgets(ev.PdbLister)
 	if err != nil {
-		return fwk.AsStatus(err), nil
+		return fwk.AsStatus(err)
 	}
 
-	victims, status := ev.selectVictimsOnDomain(ctx, preemptor, domain, pdbs)
-
-	return status, victims
+	return ev.selectVictimsOnDomain(ctx, preemptor, domain, pdbs)
 }
 
 // selectVictimsOnDomain selects a set of victims that can be removed from the
@@ -86,7 +86,7 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	ctx context.Context,
 	preemptor Preemptor,
 	domain Domain,
-	pdbs []*policy.PodDisruptionBudget) ([]*v1.Pod, *fwk.Status) {
+	pdbs []*policy.PodDisruptionBudget) *fwk.Status {
 	logger := klog.FromContext(ctx)
 	nameToNode := make(map[string]fwk.NodeInfo)
 	for _, nodeInfo := range domain.Nodes() {
@@ -125,7 +125,7 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 
 	// No preemption victims found for incoming preemptor.
 	if len(potentialVictims) == 0 {
-		return nil, fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "No preemption victims found for incoming preemptor")
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "No preemption victims found for incoming preemptor")
 	}
 
 	for _, victim := range potentialVictims {
@@ -137,13 +137,13 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 		}
 
 		if err := removePods(victim); err != nil {
-			return nil, fwk.AsStatus(err)
+			return fwk.AsStatus(err)
 		}
 	}
 
 	// If the scheduling failed after removing all potential victims, return an error.
 	if status := ev.podGroupSchedulingFunc(ctx); !status.IsSuccess() {
-		return nil, status
+		return status
 	}
 
 	sort.Slice(potentialVictims, func(i, j int) bool {
@@ -181,7 +181,7 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	var victimsToPreempt []Victim
 	for _, v := range violatingVictims {
 		if fits, err := reprieveVictim(v); err != nil {
-			return nil, fwk.AsStatus(err)
+			return fwk.AsStatus(err)
 		} else if !fits {
 			victimsToPreempt = append(victimsToPreempt, v)
 			numViolatingVictim++
@@ -190,7 +190,7 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 
 	for _, v := range nonViolatingVictims {
 		if fits, err := reprieveVictim(v); err != nil {
-			return nil, fwk.AsStatus(err)
+			return fwk.AsStatus(err)
 		} else if !fits {
 			victimsToPreempt = append(victimsToPreempt, v)
 		}
@@ -206,7 +206,17 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 		}
 	}
 
-	return podsToPreempt, nil
+	v := &extenderv1.Victims{
+		Pods: podsToPreempt,
+	}
+	executor := ev.Handler.PreemptionExecutor()
+	if executor != nil {
+		return executor.ActuatePodGroupPreemption(ctx, v, preemptor.Members(), preemptor.PodGroup(), "workload-preemption")
+	} else {
+		// This should not happen outside of tests.
+		logger.Error(errors.New("preemption executor is not set"), "Cannot actuate preemption", "PodGroup", klog.KObj(preemptor.PodGroup()))
+		return fwk.NewStatus(fwk.Error, "preemption executor is not set")
+	}
 }
 
 // isPreemptionAllowed returns whether the victim residing on nodeInfo can be preempted by the preemptor

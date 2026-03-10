@@ -27,6 +27,7 @@ import (
 	policy "k8s.io/api/policy/v1"
 	schedulingapi "k8s.io/api/scheduling/v1alpha2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
@@ -221,14 +222,18 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 				return fwk.NewStatus(fwk.Unschedulable)
 			}
 
+			executor := &mockPreemptionExecutor{}
 			pl := &PodGroupEvaluator{
+				Handler:                &mockHandle{executor: executor},
 				podGroupSchedulingFunc: mockSchedulingFunc,
 			}
 
-			gotPods, gotStatus := pl.selectVictimsOnDomain(context.Background(), tt.preemptor, domain, tt.pdbs)
+			gotStatus := pl.selectVictimsOnDomain(context.Background(), tt.preemptor, domain, tt.pdbs)
 			if gotStatus != nil && !gotStatus.IsSuccess() {
 				t.Logf("SelectVictimsOnDomain failed: %v", gotStatus.Message())
 			}
+
+			gotPods := executor.gatheredVictims
 
 			wantStatus := tt.expectedStatus[0]
 			wantCode := fwk.Success
@@ -263,4 +268,23 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 			}
 		})
 	}
+}
+
+type mockPreemptionExecutor struct {
+	fwk.PreemptionExecutor
+	gatheredVictims []*v1.Pod
+}
+
+func (m *mockPreemptionExecutor) ActuatePodGroupPreemption(ctx context.Context, victims *extenderv1.Victims, preemptorPods []*v1.Pod, preemptor *schedulingapi.PodGroup, pluginName string) *fwk.Status {
+	m.gatheredVictims = victims.Pods
+	return nil
+}
+
+type mockHandle struct {
+	fwk.Handle
+	executor fwk.PreemptionExecutor
+}
+
+func (m *mockHandle) PreemptionExecutor() fwk.PreemptionExecutor {
+	return m.executor
 }

@@ -53,6 +53,9 @@ type Preemptor interface {
 	// This is used for dry-run simulations where we need to mutate the state
 	// without affecting the original preemption context.
 	Snapshot() Preemptor
+
+	// PodGroup returns a pod group if the preemptor is a part of the PodGroup
+	PodGroup() *schedulingapi.PodGroup
 }
 
 type preemptor struct {
@@ -123,6 +126,10 @@ func (p *preemptor) Snapshot() Preemptor {
 		isGangSchedulingPolicy: p.isGangSchedulingPolicy,
 		states:                 newStates,
 	}
+}
+
+func (p *preemptor) PodGroup() *schedulingapi.PodGroup {
+	return p.podGroup
 }
 
 // Domain represents the boundary or scope within which the preemption logic is evaluated.

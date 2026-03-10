@@ -120,6 +120,7 @@ type Scheduler struct {
 
 	nominatedNodeNameForExpectationEnabled bool
 	genericWorkloadEnabled                 bool
+	workloadAwarePreemptionEnabled         bool
 }
 
 func (sched *Scheduler) applyDefaultHandlers() {
@@ -452,6 +453,7 @@ func New(ctx context.Context,
 		APIDispatcher:                          apiDispatcher,
 		nominatedNodeNameForExpectationEnabled: feature.DefaultFeatureGate.Enabled(features.NominatedNodeNameForExpectation),
 		genericWorkloadEnabled:                 feature.DefaultFeatureGate.Enabled(features.GenericWorkload),
+		workloadAwarePreemptionEnabled:         feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption),
 	}
 	sched.NextPod = podQueue.Pop
 	sched.applyDefaultHandlers()
