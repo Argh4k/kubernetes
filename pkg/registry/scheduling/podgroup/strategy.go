@@ -27,9 +27,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/pkg/apis/scheduling/validation"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 // podGroupStrategy implements behavior for PodGroup objects.
@@ -66,12 +68,17 @@ func (*podGroupStrategy) PrepareForCreate(ctx context.Context, obj runtime.Objec
 	podGroup := obj.(*scheduling.PodGroup)
 	// Status must not be set by user on create.
 	podGroup.Status = scheduling.PodGroupStatus{}
+	dropDisabledPodGroupFields(podGroup, nil)
 }
 
 func (*podGroupStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	podGroup := obj.(*scheduling.PodGroup)
 	allErrs := validation.ValidatePodGroup(podGroup)
-	return rest.ValidateDeclarativelyWithMigrationChecks(ctx, legacyscheme.Scheme, obj, nil, allErrs, operation.Create, rest.WithDeclarativeEnforcement())
+	var opts []string
+	if feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+		opts = append(opts, string(features.WorkloadAwarePreemption))
+	}
+	return rest.ValidateDeclarativelyWithMigrationChecks(ctx, legacyscheme.Scheme, obj, nil, allErrs, operation.Create, rest.WithDeclarativeEnforcement(), rest.WithOptions(opts))
 }
 
 func (*podGroupStrategy) WarningsOnCreate(ctx context.Context, obj runtime.Object) []string {
@@ -88,13 +95,18 @@ func (*podGroupStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.
 	newPodGroup := obj.(*scheduling.PodGroup)
 	oldPodGroup := old.(*scheduling.PodGroup)
 	newPodGroup.Status = oldPodGroup.Status
+	dropDisabledPodGroupFields(newPodGroup, oldPodGroup)
 }
 
 func (*podGroupStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	newPodGroup := obj.(*scheduling.PodGroup)
 	oldPodGroup := old.(*scheduling.PodGroup)
 	allErrs := validation.ValidatePodGroupUpdate(newPodGroup, oldPodGroup)
-	return rest.ValidateDeclarativelyWithMigrationChecks(ctx, legacyscheme.Scheme, newPodGroup, oldPodGroup, allErrs, operation.Update, rest.WithDeclarativeEnforcement())
+	var opts []string
+	if feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+		opts = append(opts, string(features.WorkloadAwarePreemption))
+	}
+	return rest.ValidateDeclarativelyWithMigrationChecks(ctx, legacyscheme.Scheme, newPodGroup, oldPodGroup, allErrs, operation.Update, rest.WithDeclarativeEnforcement(), rest.WithOptions(opts))
 }
 
 func (*podGroupStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
@@ -144,4 +156,64 @@ func (r *podGroupStatusStrategy) ValidateUpdate(ctx context.Context, obj, old ru
 // WarningsOnUpdate returns warnings for the given update.
 func (*podGroupStatusStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
 	return nil
+}
+
+// dropDisabledPodGroupFields removes fields which are covered by a feature gate.
+func dropDisabledPodGroupFields(podGroup, oldPodGroup *scheduling.PodGroup) {
+	var podGroupSpec, oldPodGroupSpec *scheduling.PodGroupSpec
+	if podGroup != nil {
+		podGroupSpec = &podGroup.Spec
+	}
+	if oldPodGroup != nil {
+		oldPodGroupSpec = &oldPodGroup.Spec
+	}
+	dropDisabledPodGroupSpecFields(podGroupSpec, oldPodGroupSpec)
+}
+
+func dropDisabledPodGroupSpecFields(podGroupSpec, oldPodGroupSpec *scheduling.PodGroupSpec) {
+	dropDisabledDisruptionModeField(podGroupSpec, oldPodGroupSpec)
+	dropDisabledPriorityClassNameField(podGroupSpec, oldPodGroupSpec)
+	dropDisabledPriorityField(podGroupSpec, oldPodGroupSpec)
+}
+
+// dropDisabledDisruptionModeField removes the DisruptionMode field unless it is
+// already used in the old PodGroup spec.
+func dropDisabledDisruptionModeField(podGroupSpec, oldPodGroupSpec *scheduling.PodGroupSpec) {
+	if feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) || disruptionModeInUse(oldPodGroupSpec) {
+		// No need to drop anything.
+		return
+	}
+	podGroupSpec.DisruptionMode = nil
+}
+
+// dropDisabledPriorityClassNameField removes the PriorityClassName field unless
+// it is already used in the old PodGroup spec.
+func dropDisabledPriorityClassNameField(podGroupSpec, oldPodGroupSpec *scheduling.PodGroupSpec) {
+	if feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) || priorityClassNameInUse(oldPodGroupSpec) {
+		// No need to drop anything.
+		return
+	}
+	podGroupSpec.PriorityClassName = ""
+}
+
+// dropDisabledPriorityField removes the Priority field unless it is already used
+// in the old PodGroup spec.
+func dropDisabledPriorityField(podGroupSpec, oldPodGroupSpec *scheduling.PodGroupSpec) {
+	if feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) || priorityInUse(oldPodGroupSpec) {
+		// No need to drop anything.
+		return
+	}
+	podGroupSpec.Priority = nil
+}
+
+func disruptionModeInUse(podGroupSpec *scheduling.PodGroupSpec) bool {
+	return podGroupSpec != nil && podGroupSpec.DisruptionMode != nil
+}
+
+func priorityClassNameInUse(podGroupSpec *scheduling.PodGroupSpec) bool {
+	return podGroupSpec != nil && podGroupSpec.PriorityClassName != ""
+}
+
+func priorityInUse(podGroupSpec *scheduling.PodGroupSpec) bool {
+	return podGroupSpec != nil && podGroupSpec.Priority != nil
 }

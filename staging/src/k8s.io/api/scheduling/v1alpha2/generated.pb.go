@@ -275,6 +275,23 @@ func (m *PodGroupSpec) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if m.Priority != nil {
+		i = encodeVarintGenerated(dAtA, i, uint64(*m.Priority))
+		i--
+		dAtA[i] = 0x28
+	}
+	i -= len(m.PriorityClassName)
+	copy(dAtA[i:], m.PriorityClassName)
+	i = encodeVarintGenerated(dAtA, i, uint64(len(m.PriorityClassName)))
+	i--
+	dAtA[i] = 0x22
+	if m.DisruptionMode != nil {
+		i -= len(*m.DisruptionMode)
+		copy(dAtA[i:], *m.DisruptionMode)
+		i = encodeVarintGenerated(dAtA, i, uint64(len(*m.DisruptionMode)))
+		i--
+		dAtA[i] = 0x1a
+	}
 	{
 		size, err := m.SchedulingPolicy.MarshalToSizedBuffer(dAtA[:i])
 		if err != nil {
@@ -357,6 +374,23 @@ func (m *PodGroupTemplate) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if m.Priority != nil {
+		i = encodeVarintGenerated(dAtA, i, uint64(*m.Priority))
+		i--
+		dAtA[i] = 0x28
+	}
+	i -= len(m.PriorityClassName)
+	copy(dAtA[i:], m.PriorityClassName)
+	i = encodeVarintGenerated(dAtA, i, uint64(len(m.PriorityClassName)))
+	i--
+	dAtA[i] = 0x22
+	if m.DisruptionMode != nil {
+		i -= len(*m.DisruptionMode)
+		copy(dAtA[i:], *m.DisruptionMode)
+		i = encodeVarintGenerated(dAtA, i, uint64(len(*m.DisruptionMode)))
+		i--
+		dAtA[i] = 0x1a
+	}
 	{
 		size, err := m.SchedulingPolicy.MarshalToSizedBuffer(dAtA[:i])
 		if err != nil {
@@ -711,6 +745,15 @@ func (m *PodGroupSpec) Size() (n int) {
 	}
 	l = m.SchedulingPolicy.Size()
 	n += 1 + l + sovGenerated(uint64(l))
+	if m.DisruptionMode != nil {
+		l = len(*m.DisruptionMode)
+		n += 1 + l + sovGenerated(uint64(l))
+	}
+	l = len(m.PriorityClassName)
+	n += 1 + l + sovGenerated(uint64(l))
+	if m.Priority != nil {
+		n += 1 + sovGenerated(uint64(*m.Priority))
+	}
 	return n
 }
 
@@ -739,6 +782,15 @@ func (m *PodGroupTemplate) Size() (n int) {
 	n += 1 + l + sovGenerated(uint64(l))
 	l = m.SchedulingPolicy.Size()
 	n += 1 + l + sovGenerated(uint64(l))
+	if m.DisruptionMode != nil {
+		l = len(*m.DisruptionMode)
+		n += 1 + l + sovGenerated(uint64(l))
+	}
+	l = len(m.PriorityClassName)
+	n += 1 + l + sovGenerated(uint64(l))
+	if m.Priority != nil {
+		n += 1 + sovGenerated(uint64(*m.Priority))
+	}
 	return n
 }
 
@@ -903,6 +955,9 @@ func (this *PodGroupSpec) String() string {
 	s := strings.Join([]string{`&PodGroupSpec{`,
 		`PodGroupTemplateRef:` + strings.Replace(this.PodGroupTemplateRef.String(), "PodGroupTemplateReference", "PodGroupTemplateReference", 1) + `,`,
 		`SchedulingPolicy:` + strings.Replace(strings.Replace(this.SchedulingPolicy.String(), "PodGroupSchedulingPolicy", "PodGroupSchedulingPolicy", 1), `&`, ``, 1) + `,`,
+		`DisruptionMode:` + valueToStringGenerated(this.DisruptionMode) + `,`,
+		`PriorityClassName:` + fmt.Sprintf("%v", this.PriorityClassName) + `,`,
+		`Priority:` + valueToStringGenerated(this.Priority) + `,`,
 		`}`,
 	}, "")
 	return s
@@ -929,6 +984,9 @@ func (this *PodGroupTemplate) String() string {
 	s := strings.Join([]string{`&PodGroupTemplate{`,
 		`Name:` + fmt.Sprintf("%v", this.Name) + `,`,
 		`SchedulingPolicy:` + strings.Replace(strings.Replace(this.SchedulingPolicy.String(), "PodGroupSchedulingPolicy", "PodGroupSchedulingPolicy", 1), `&`, ``, 1) + `,`,
+		`DisruptionMode:` + valueToStringGenerated(this.DisruptionMode) + `,`,
+		`PriorityClassName:` + fmt.Sprintf("%v", this.PriorityClassName) + `,`,
+		`Priority:` + valueToStringGenerated(this.Priority) + `,`,
 		`}`,
 	}, "")
 	return s
@@ -1622,6 +1680,91 @@ func (m *PodGroupSpec) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field DisruptionMode", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			s := DisruptionMode(dAtA[iNdEx:postIndex])
+			m.DisruptionMode = &s
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PriorityClassName", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.PriorityClassName = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Priority", wireType)
+			}
+			var v int32
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Priority = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := skipGenerated(dAtA[iNdEx:])
@@ -1821,6 +1964,91 @@ func (m *PodGroupTemplate) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field DisruptionMode", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			s := DisruptionMode(dAtA[iNdEx:postIndex])
+			m.DisruptionMode = &s
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PriorityClassName", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGenerated
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.PriorityClassName = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Priority", wireType)
+			}
+			var v int32
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Priority = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := skipGenerated(dAtA[iNdEx:])

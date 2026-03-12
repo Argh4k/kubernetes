@@ -27,6 +27,7 @@ import (
 // when managing the lifecycle of workloads from the scheduling perspective,
 // including scheduling, preemption, eviction and other phases.
 // Workload API enablement is toggled by the GenericWorkload feature gate.
+// +k8s:validation-gen-nolint  // to allow pre-GA tags while this API is pre-GA
 type Workload struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard object's metadata.
@@ -67,7 +68,7 @@ type WorkloadSpec struct {
 	//
 	// +optional
 	// +k8s:optional
-	// +k8s:alpha(since:"1.36")=+k8s:immutable
+	// +k8s:immutable
 	ControllerRef *TypedLocalObjectReference `json:"controllerRef,omitempty" protobuf:"bytes,1,opt,name=controllerRef"`
 
 	// PodGroupTemplates is the list of templates that make up the Workload.
@@ -80,7 +81,7 @@ type WorkloadSpec struct {
 	// +k8s:listType=map
 	// +k8s:listMapKey=name
 	// +k8s:maxItems=8
-	// +k8s:alpha(since:"1.36")=+k8s:immutable
+	// +k8s:immutable
 	PodGroupTemplates []PodGroupTemplate `json:"podGroupTemplates" protobuf:"bytes,2,rep,name=podGroupTemplates"`
 }
 
@@ -125,6 +126,46 @@ type PodGroupTemplate struct {
 	//
 	// +required
 	SchedulingPolicy PodGroupSchedulingPolicy `json:"schedulingPolicy" protobuf:"bytes,2,opt,name=schedulingPolicy"`
+
+	// DisruptionMode defines the mode in which a given PodGroup can be disrupted.
+	// One of Pod, PodGroup.
+	// This field is available only when the WorkloadAwarePreemption feature gate
+	// is enabled.
+	//
+	// +featureGate=WorkloadAwarePreemption
+	// +optional
+	// +k8s:ifDisabled("WorkloadAwarePreemption")=+k8s:forbidden
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:optional
+	DisruptionMode *DisruptionMode `json:"disruptionMode,omitempty" protobuf:"bytes,3,opt,name=disruptionMode,casttype=DisruptionMode"`
+
+	// PriorityClassName indicates the priority that should be considered when scheduling
+	// a pod group created from this template. If no priority class is specified, admission
+	// control can set this to the global default priority class if it exists. Otherwise,
+	// pod groups created from this template will have the priority set to zero.
+	// This field is available only when the WorkloadAwarePreemption feature gate
+	// is enabled.
+	//
+	// +featureGate=WorkloadAwarePreemption
+	// +optional
+	// +k8s:ifDisabled("WorkloadAwarePreemption")=+k8s:forbidden
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:optional
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:format=k8s-long-name
+	PriorityClassName string `json:"priorityClassName,omitempty" protobuf:"bytes,4,opt,name=priorityClassName"`
+
+	// Priority is the value of priority of pod groups created from this template. Various
+	// system components use this field to find the priority of the pod group. When
+	// Priority Admission Controller is enabled, it prevents users from setting this field.
+	// The admission controller populates this field from PriorityClassName.
+	// The higher the value, the higher the priority.
+	// This field is available only when the WorkloadAwarePreemption feature gate
+	// is enabled.
+	//
+	// +featureGate=WorkloadAwarePreemption
+	// +optional
+	// +k8s:ifDisabled("WorkloadAwarePreemption")=+k8s:forbidden
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:optional
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:maximum=1000000000 # HighestUserDefinablePriority
+	Priority *int32 `json:"priority,omitempty" protobuf:"varint,5,opt,name=priority"`
 }
 
 // PodGroupSchedulingPolicy defines the scheduling configuration for a PodGroup.
@@ -169,6 +210,21 @@ type GangSchedulingPolicy struct {
 	MinCount int32 `json:"minCount" protobuf:"varint,1,opt,name=minCount"`
 }
 
+// DisruptionMode describes the mode in which a PodGroup can be disrupted (e.g. preempted).
+// +enum
+// +k8s:validation-gen-nolint  // to allow pre-GA tags while this API is pre-GA
+// +k8s:enum
+type DisruptionMode string
+
+const (
+	// DisruptionModePod means that individual pods can be disrupted or preempted independently.
+	// It doesn't depend on exact set of pods currently running in this PodGroup.
+	DisruptionModePod DisruptionMode = "Pod"
+	// DisruptionModePodGroup means that the whole PodGroup needs to be disrupted
+	// or preempted together.
+	DisruptionModePodGroup DisruptionMode = "PodGroup"
+)
+
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +k8s:supportsSubresource="/status"
@@ -177,6 +233,7 @@ type GangSchedulingPolicy struct {
 // PodGroups are created by workload controllers (Job, LWS, JobSet, etc...) from
 // Workload.podGroupTemplates.
 // PodGroup API enablement is toggled by the GenericWorkload feature gate.
+// +k8s:validation-gen-nolint  // to allow pre-GA tags while this API is pre-GA
 type PodGroup struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard object's metadata.
@@ -217,7 +274,7 @@ type PodGroupSpec struct {
 	//
 	// +optional
 	// +k8s:optional
-	// +k8s:alpha(since:"1.36")=+k8s:immutable
+	// +k8s:immutable
 	PodGroupTemplateRef *PodGroupTemplateReference `json:"podGroupTemplateRef" protobuf:"bytes,1,opt,name=podGroupTemplateRef"`
 
 	// SchedulingPolicy defines the scheduling policy for this instance of the PodGroup.
@@ -225,8 +282,57 @@ type PodGroupSpec struct {
 	// This field is immutable.
 	//
 	// +required
-	// +k8s:alpha(since:"1.36")=+k8s:immutable
+	// +k8s:immutable
 	SchedulingPolicy PodGroupSchedulingPolicy `json:"schedulingPolicy" protobuf:"bytes,2,opt,name=schedulingPolicy"`
+
+	// DisruptionMode defines the mode in which a given PodGroup can be disrupted.
+	// Controllers are expected to fill this field by copying it from a PodGroupTemplate.
+	// One of Pod, PodGroup. Defaults to Pod if unset.
+	// This field is immutable.
+	// This field is available only when the WorkloadAwarePreemption feature gate
+	// is enabled.
+	//
+	// +featureGate=WorkloadAwarePreemption
+	// +optional
+	// +k8s:ifDisabled("WorkloadAwarePreemption")=+k8s:forbidden
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:optional
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:immutable
+	// +default="Pod"
+	DisruptionMode *DisruptionMode `json:"disruptionMode,omitempty" protobuf:"bytes,3,opt,name=disruptionMode,casttype=DisruptionMode"`
+
+	// PriorityClassName defines the priority that should be considered when scheduling this pod group.
+	// Controllers are expected to fill this field by copying it from a PodGroupTemplate.
+	// Otherwise, it is validated and resolved similarly to the PriorityClassName on PodGroupTemplate
+	// (i.e. if no priority class is specified, admission control can set this to the global default
+	// priority class if it exists. Otherwise, the pod group's priority will be zero).
+	// This field is immutable.
+	// This field is available only when the WorkloadAwarePreemption feature gate
+	// is enabled.
+	//
+	// +featureGate=WorkloadAwarePreemption
+	// +optional
+	// +k8s:ifDisabled("WorkloadAwarePreemption")=+k8s:forbidden
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:optional
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:format=k8s-long-name
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:immutable
+	PriorityClassName string `json:"priorityClassName,omitempty" protobuf:"bytes,4,opt,name=priorityClassName"`
+
+	// Priority is the value of priority of this pod group. Various system components
+	// use this field to find the priority of the pod group. When Priority Admission
+	// Controller is enabled, it prevents users from setting this field. The admission
+	// controller populates this field from PriorityClassName.
+	// The higher the value, the higher the priority.
+	// This field is immutable.
+	// This field is available only when the WorkloadAwarePreemption feature gate
+	// is enabled.
+	//
+	// +featureGate=WorkloadAwarePreemption
+	// +optional
+	// +k8s:ifDisabled("WorkloadAwarePreemption")=+k8s:forbidden
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:optional
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:immutable
+	// +k8s:ifEnabled("WorkloadAwarePreemption")=+k8s:maximum=1000000000 # HighestUserDefinablePriority
+	Priority *int32 `json:"priority,omitempty" protobuf:"varint,5,opt,name=priority"`
 }
 
 // PodGroupStatus represents information about the status of a pod group.

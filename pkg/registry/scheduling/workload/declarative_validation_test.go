@@ -22,13 +22,23 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/util/version"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
 	"k8s.io/kubernetes/pkg/apis/scheduling"
+	"k8s.io/kubernetes/pkg/features"
 
 	// Ensure all API groups are registered with the scheme
 	_ "k8s.io/kubernetes/pkg/apis/scheduling/install"
+)
+
+var allowedDisruptionModes = sets.New(
+	scheduling.DisruptionModePod,
+	scheduling.DisruptionModePodGroup,
 )
 
 func TestDeclarativeValidate(t *testing.T) {
@@ -50,8 +60,9 @@ func testDeclarativeValidate(t *testing.T, apiVersion string) {
 	})
 
 	testCases := map[string]struct {
-		input        scheduling.Workload
-		expectedErrs field.ErrorList
+		input                         scheduling.Workload
+		enableWorkloadAwarePreemption bool
+		expectedErrs                  field.ErrorList
 	}{
 		"valid": {
 			input: mkValidWorkload(),
@@ -135,10 +146,87 @@ func testDeclarativeValidate(t *testing.T, apiVersion string) {
 		"valid with basic policy": {
 			input: mkValidWorkload(setBasicPolicy(0)),
 		},
+		"pod disruption mode, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setDisruptionMode(0, podDisruptionMode)),
+			enableWorkloadAwarePreemption: true,
+		},
+		"pod disruption mode, workload aware preemption disabled": {
+			input:        mkValidWorkload(setDisruptionMode(0, podDisruptionMode)),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("disruptionMode"), "")},
+		},
+		"pod group disruption mode, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setDisruptionMode(0, podGroupDisruptionMode)),
+			enableWorkloadAwarePreemption: true,
+		},
+		"pod group disruption mode, workload aware preemption disabled": {
+			input:        mkValidWorkload(setDisruptionMode(0, podGroupDisruptionMode)),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("disruptionMode"), "")},
+		},
+		"invalid disruption mode, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setDisruptionMode(0, invalidDisruptionMode)),
+			enableWorkloadAwarePreemption: true,
+			expectedErrs:                  field.ErrorList{field.NotSupported(field.NewPath("spec", "podGroupTemplates").Index(0).Child("disruptionMode"), invalidDisruptionMode, sets.List(allowedDisruptionModes))},
+		},
+		"invalid disruption mode, workload aware preemption disabled": {
+			input:        mkValidWorkload(setDisruptionMode(0, invalidDisruptionMode)),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("disruptionMode"), "")},
+		},
+		"valid priorityClassName, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setPriorityClassName(0, "high-priority")),
+			enableWorkloadAwarePreemption: true,
+		},
+		"valid priorityClassName, workload aware preemption disabled": {
+			input:        mkValidWorkload(setPriorityClassName(0, "high-priority")),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priorityClassName"), "")},
+		},
+		"invalid priorityClassName, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setPriorityClassName(0, "high/priority")),
+			enableWorkloadAwarePreemption: true,
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priorityClassName"), nil, "").WithOrigin("format=k8s-long-name"),
+			},
+		},
+		"invalid priorityClassName, workload aware preemption disabled": {
+			input:        mkValidWorkload(setPriorityClassName(0, "high/priority")),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priorityClassName"), "")},
+		},
+
+		"valid priority, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setPriority(0, 1000)),
+			enableWorkloadAwarePreemption: true,
+		},
+		"valid priority, workload aware preemption disabled": {
+			input:        mkValidWorkload(setPriority(0, 1000)),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priority"), "")},
+		},
+		"valid negative priority, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setPriority(0, -2147483648)),
+			enableWorkloadAwarePreemption: true,
+		},
+		"valid negative priority, workload aware preemption disabled": {
+			input:        mkValidWorkload(setPriority(0, -2147483648)),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priority"), "")},
+		},
+		"too high priority, workload aware preemption enabled": {
+			input:                         mkValidWorkload(setPriority(0, scheduling.HighestUserDefinablePriority+1)),
+			enableWorkloadAwarePreemption: true,
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priority"), nil, "").WithOrigin("maximum"),
+			},
+		},
+		"too high priority, workload aware preemption disabled": {
+			input:        mkValidWorkload(setPriority(0, scheduling.HighestUserDefinablePriority+1)),
+			expectedErrs: field.ErrorList{field.Forbidden(field.NewPath("spec", "podGroupTemplates").Index(0).Child("priority"), "")},
+		},
 	}
 	for k, tc := range testCases {
 		t.Run(k, func(t *testing.T) {
-			apitesting.VerifyValidationEquivalence(t, ctx, &tc.input, Strategy.Validate, tc.expectedErrs)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.GenericWorkload:         true,
+				features.GangScheduling:          tc.enableWorkloadAwarePreemption,
+				features.WorkloadAwarePreemption: tc.enableWorkloadAwarePreemption,
+			})
+			apitesting.VerifyValidationEquivalence(t, ctx, &tc.input, Strategy.Validate, tc.expectedErrs, apitesting.WithMinEmulationVersion(version.MustParse("1.36")))
 		})
 	}
 }
@@ -154,9 +242,10 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 
 func testDeclarativeValidateUpdate(t *testing.T, apiVersion string) {
 	testCases := map[string]struct {
-		oldObj       scheduling.Workload
-		updateObj    scheduling.Workload
-		expectedErrs field.ErrorList
+		oldObj                        scheduling.Workload
+		updateObj                     scheduling.Workload
+		enableWorkloadAwarePreemption bool
+		expectedErrs                  field.ErrorList
 	}{
 		"valid update": {
 			oldObj:    mkValidWorkload(setResourceVersion("1")),
@@ -169,24 +258,31 @@ func testDeclarativeValidateUpdate(t *testing.T, apiVersion string) {
 		"set controllerRef": {
 			oldObj:       mkValidWorkload(setResourceVersion("1")),
 			updateObj:    mkValidWorkload(setResourceVersion("1"), setControllerRef("apps", "Deployment", "different-deployment")),
-			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "controllerRef"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha()},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "controllerRef"), nil, "").WithOrigin("immutable")},
 		},
 		"invalid update controllerRef": {
 			oldObj:       mkValidWorkload(setResourceVersion("1"), setControllerRef("apps", "Deployment", "my-deployment")),
 			updateObj:    mkValidWorkload(setResourceVersion("1"), setControllerRef("apps", "Deployment", "different-deployment")),
-			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "controllerRef"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha()},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "controllerRef"), nil, "").WithOrigin("immutable")},
 		},
 		"unset controllerRef": {
 			oldObj:       mkValidWorkload(setResourceVersion("1"), setControllerRef("apps", "Deployment", "different-deployment")),
 			updateObj:    mkValidWorkload(setResourceVersion("1")),
-			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "controllerRef"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha()},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "controllerRef"), nil, "").WithOrigin("immutable")},
 		},
 		"invalid update empty podGroupTemplates": {
 			oldObj:    mkValidWorkload(setResourceVersion("1")),
 			updateObj: mkValidWorkload(setResourceVersion("1"), setEmptyPodGroupTemplates()),
 			expectedErrs: field.ErrorList{
 				field.Required(field.NewPath("spec", "podGroupTemplates"), "must have at least one item"),
-				field.Invalid(field.NewPath("spec", "podGroupTemplates"), []scheduling.PodGroupTemplate{}, "field is immutable").WithOrigin("immutable").MarkAlpha(),
+				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable"),
+			},
+		},
+		"change podGroupTemplate name": {
+			oldObj:    mkValidWorkload(setResourceVersion("1"), addPodGroupTemplate("worker1")),
+			updateObj: mkValidWorkload(setResourceVersion("1"), addPodGroupTemplate("worker2")),
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable"),
 			},
 		},
 		"invalid update too many podGroupTemplates": {
@@ -194,32 +290,75 @@ func testDeclarativeValidateUpdate(t *testing.T, apiVersion string) {
 			updateObj: mkValidWorkload(setResourceVersion("1"), setManyPodGroupTemplates(scheduling.WorkloadMaxPodGroupTemplates+1)),
 			expectedErrs: field.ErrorList{
 				field.TooMany(field.NewPath("spec", "podGroupTemplates"), scheduling.WorkloadMaxPodGroupTemplates+1, scheduling.WorkloadMaxPodGroupTemplates).WithOrigin("maxItems"),
-				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha(),
+				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable"),
 			},
 		},
-		"invalid update podGroupTemplate": {
+		"add podGroupTemplate": {
 			oldObj:       mkValidWorkload(setResourceVersion("1")),
 			updateObj:    mkValidWorkload(setResourceVersion("1"), addPodGroupTemplate("worker1")),
-			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha()},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"remove podGroupTemplate": {
+			oldObj:       mkValidWorkload(setResourceVersion("1"), addPodGroupTemplate("worker1")),
+			updateObj:    mkValidWorkload(setResourceVersion("1")),
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
 		},
 		"invalid update with neither basic nor gang": {
 			oldObj:    mkValidWorkload(setResourceVersion("1")),
 			updateObj: mkValidWorkload(setResourceVersion("1"), clearPodGroupPolicy(0)),
 			expectedErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha(),
+				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable"),
 			},
 		},
 		"invalid update with both basic and gang": {
 			oldObj:    mkValidWorkload(setResourceVersion("1")),
 			updateObj: mkValidWorkload(setResourceVersion("1"), setBothPolicies(0)),
 			expectedErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha(),
+				field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable"),
 			},
+		},
+		"invalid update of gang minCount": {
+			oldObj:       mkValidWorkload(setResourceVersion("1")),
+			updateObj:    mkValidWorkload(setResourceVersion("1"), setPodGroupMinCount(0, 10)),
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
 		},
 		"valid update from gang to basic policy": {
 			oldObj:       mkValidWorkload(setResourceVersion("1")),
 			updateObj:    mkValidWorkload(setResourceVersion("1"), setBasicPolicy(0)),
-			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "field is immutable").WithOrigin("immutable").MarkAlpha()},
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"invalid update of disruption mode, workload aware preemption enabled": {
+			oldObj:                        mkValidWorkload(setResourceVersion("1"), setDisruptionMode(0, podDisruptionMode)),
+			updateObj:                     mkValidWorkload(setResourceVersion("1"), setDisruptionMode(0, podGroupDisruptionMode)),
+			enableWorkloadAwarePreemption: true,
+			expectedErrs:                  field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"invalid update of disruption mode, workload aware preemption disabled": {
+			oldObj:       mkValidWorkload(setResourceVersion("1"), setDisruptionMode(0, podDisruptionMode)),
+			updateObj:    mkValidWorkload(setResourceVersion("1"), setDisruptionMode(0, podGroupDisruptionMode)),
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"invalid update of priority class name, workload aware preemption enabled": {
+			oldObj:                        mkValidWorkload(setResourceVersion("1"), setPriorityClassName(0, "low-priority")),
+			updateObj:                     mkValidWorkload(setResourceVersion("1"), setPriorityClassName(0, "high-priority")),
+			enableWorkloadAwarePreemption: true,
+			expectedErrs:                  field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"invalid update of priority class name, workload aware preemption disabled": {
+			oldObj:       mkValidWorkload(setResourceVersion("1"), setPriorityClassName(0, "low-priority")),
+			updateObj:    mkValidWorkload(setResourceVersion("1"), setPriorityClassName(0, "high-priority")),
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"invalid update of priority, workload aware preemption enabled": {
+			oldObj:                        mkValidWorkload(setResourceVersion("1"), setPriority(0, 1000)),
+			updateObj:                     mkValidWorkload(setResourceVersion("1"), setPriority(0, 2000)),
+			enableWorkloadAwarePreemption: true,
+			expectedErrs:                  field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
+		},
+		"invalid update of priority, workload aware preemption disabled": {
+			oldObj:       mkValidWorkload(setResourceVersion("1"), setPriority(0, 1000)),
+			updateObj:    mkValidWorkload(setResourceVersion("1"), setPriority(0, 2000)),
+			expectedErrs: field.ErrorList{field.Invalid(field.NewPath("spec", "podGroupTemplates"), nil, "").WithOrigin("immutable")},
 		},
 	}
 	for k, tc := range testCases {
@@ -233,7 +372,12 @@ func testDeclarativeValidateUpdate(t *testing.T, apiVersion string) {
 				IsResourceRequest: true,
 				Verb:              "update",
 			})
-			apitesting.VerifyUpdateValidationEquivalence(t, ctx, &tc.updateObj, &tc.oldObj, Strategy.ValidateUpdate, tc.expectedErrs)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.GenericWorkload:         true,
+				features.GangScheduling:          tc.enableWorkloadAwarePreemption,
+				features.WorkloadAwarePreemption: tc.enableWorkloadAwarePreemption,
+			})
+			apitesting.VerifyUpdateValidationEquivalence(t, ctx, &tc.updateObj, &tc.oldObj, Strategy.ValidateUpdate, tc.expectedErrs, apitesting.WithMinEmulationVersion(version.MustParse("1.36")))
 		})
 	}
 }
@@ -352,5 +496,23 @@ func setControllerRef(apiGroup, kind, name string) func(obj *scheduling.Workload
 			Kind:     kind,
 			Name:     name,
 		}
+	}
+}
+
+func setDisruptionMode(pgIdx int, mode scheduling.DisruptionMode) func(obj *scheduling.Workload) {
+	return func(obj *scheduling.Workload) {
+		obj.Spec.PodGroupTemplates[pgIdx].DisruptionMode = &mode
+	}
+}
+
+func setPriorityClassName(pgIdx int, priorityClassName string) func(obj *scheduling.Workload) {
+	return func(obj *scheduling.Workload) {
+		obj.Spec.PodGroupTemplates[pgIdx].PriorityClassName = priorityClassName
+	}
+}
+
+func setPriority(pgIdx int, priority int32) func(obj *scheduling.Workload) {
+	return func(obj *scheduling.Workload) {
+		obj.Spec.PodGroupTemplates[pgIdx].Priority = new(priority)
 	}
 }

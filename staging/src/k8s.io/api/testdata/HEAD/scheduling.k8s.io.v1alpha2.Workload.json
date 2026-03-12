@@ -57,7 +57,10 @@
           "gang": {
             "minCount": 1
           }
-        }
+        },
+        "disruptionMode": "disruptionModeValue",
+        "priorityClassName": "priorityClassNameValue",
+        "priority": 5
       }
     ]
   }
