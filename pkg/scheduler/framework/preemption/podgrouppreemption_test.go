@@ -61,7 +61,6 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 			preemptor: NewPodGroupPreemptor(
 				&schedulingapi.PodGroup{ObjectMeta: metav1.ObjectMeta{Name: "preemptor-pg"}},
 				[]*v1.Pod{st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()},
-				[]fwk.CycleState{framework.NewCycleState()},
 			),
 			blockingRules: []blockingRule{
 				{nodeName: "node1", capacity: 1, blockingVictims: []string{"p1"}},
@@ -82,7 +81,6 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 			preemptor: NewPodGroupPreemptor(
 				&schedulingapi.PodGroup{ObjectMeta: metav1.ObjectMeta{Name: "preemptor-pg"}},
 				[]*v1.Pod{st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()},
-				[]fwk.CycleState{framework.NewCycleState()},
 			),
 			blockingRules: []blockingRule{
 				{nodeName: "node1", capacity: 1, blockingVictims: []string{"p1"}},
@@ -102,7 +100,6 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 			preemptor: NewPodGroupPreemptor(
 				&schedulingapi.PodGroup{ObjectMeta: metav1.ObjectMeta{Name: "preemptor-pg"}},
 				[]*v1.Pod{st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()},
-				[]fwk.CycleState{framework.NewCycleState()},
 			),
 			blockingRules: []blockingRule{
 				{nodeName: "node1", capacity: 1, blockingVictims: []string{"p1"}},
@@ -128,7 +125,6 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 					st.MakePod().Name("p-2").UID("p-2").Priority(highPriority).Obj(),
 					st.MakePod().Name("p-3").UID("p-3").Priority(highPriority).Obj(),
 				},
-				[]fwk.CycleState{framework.NewCycleState()},
 			),
 			blockingRules: []blockingRule{
 				{nodeName: "node1", capacity: 1, blockingVictims: []string{"p1"}},
@@ -156,7 +152,6 @@ func TestWorkloadExecutor_SelectVictimsOnDomain(t *testing.T) {
 			preemptor: NewPodGroupPreemptor(
 				&schedulingapi.PodGroup{ObjectMeta: metav1.ObjectMeta{Name: "preemptor-pg"}},
 				[]*v1.Pod{st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()},
-				[]fwk.CycleState{framework.NewCycleState()},
 			),
 			blockingRules: []blockingRule{
 				{nodeName: "node1", capacity: 1, blockingVictims: []string{"victim-pdb"}},

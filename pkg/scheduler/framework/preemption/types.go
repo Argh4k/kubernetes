@@ -76,7 +76,7 @@ func NewPodPreemptor(p *v1.Pod, state fwk.CycleState) Preemptor {
 	}
 }
 
-func NewPodGroupPreemptor(pg *schedulingapi.PodGroup, pods []*v1.Pod, states []fwk.CycleState) Preemptor {
+func NewPodGroupPreemptor(pg *schedulingapi.PodGroup, pods []*v1.Pod) Preemptor {
 	prio := int32(0)
 	// TODO(Argh4k): Replace it with pg.Spec.Priority once it's implemented:
 	// https://github.com/kubernetes/kubernetes/pull/136426
@@ -91,7 +91,6 @@ func NewPodGroupPreemptor(pg *schedulingapi.PodGroup, pods []*v1.Pod, states []f
 		pods:             pods,
 		preemptionPolicy: new(v1.PreemptLowerPriority),
 		podGroup:         pg,
-		states:           states,
 	}
 }
 

@@ -231,7 +231,7 @@ func (sched *Scheduler) podGroupCycle(ctx context.Context, schedFwk framework.Fr
 	// Run workload aware preemption if required. If the preemption is successful,
 	// we need to put the victims back into the queue.
 	if useWAP && result.status.Code() == fwk.Unschedulable {
-		status := sched.workloadAwarePreemption(ctx, result, schedFwk, podGroupInfo)
+		status := sched.workloadAwarePreemption(ctx, schedFwk, podGroupInfo)
 		if status.IsSuccess() {
 			result.waitingOnPreemption = true
 		}
@@ -245,11 +245,13 @@ func (sched *Scheduler) podGroupCycle(ctx context.Context, schedFwk framework.Fr
 // which modifies the state of the cluster to check feasibility of the
 // pod group scheduling given changed cluster state and reverts the cluster state
 // to the snapshot.
+// If the placement is set, the preemption is run only on the nodes from the placemet.
+// Otherwise the preemption is run over all nodes in the cluster.  
 // If the preemption evaluation is successful, preemption victims are preempted
 // by a preemption executor.
 // The function used for evaluating feasibility of pod group scheduling is
 // scheduler.podGroupSchedulingDefaultAlgorithm run without any post filters.
-func (sched *Scheduler) workloadAwarePreemption(ctx context.Context, schedRes podGroupAlgorithmResult, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo) *fwk.Status {
+func (sched *Scheduler) workloadAwarePreemption(ctx context.Context, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo) *fwk.Status {
 	restoreFn := sched.nodeInfoSnapshot.BackupSnapshot()
 	defer restoreFn()
 	executor := preemption.NewPodGroupEvaluator(fmt.Sprintf("%s-preeemption", podGroupInfo.GetName()), schedFwk, func(ctx context.Context) *fwk.Status {
@@ -257,17 +259,16 @@ func (sched *Scheduler) workloadAwarePreemption(ctx context.Context, schedRes po
 		return res.status
 	})
 
-	cycleStates := make([]fwk.CycleState, len(schedRes.podResults))
-	for i, podResult := range schedRes.podResults {
-		cycleStates[i] = podResult.podCtx.state
-	}
-
 	pg, err := schedFwk.SharedInformerFactory().Scheduling().V1alpha2().PodGroups().Lister().PodGroups(podGroupInfo.Namespace).Get(podGroupInfo.Name)
 	if err != nil {
 		return fwk.AsStatus(fmt.Errorf("failed to get pod group %s/%s", podGroupInfo.Namespace, podGroupInfo.Name))
 	}
 
-	status, victims := executor.Preempt(ctx, pg, cycleStates, podGroupInfo.UnscheduledPods)
+	nodes, err  := sched.nodeInfoSnapshot.ListNodesInPlacement()
+	if err != nil {
+		return fwk.AsStatus(fmt.Errorf("failed to list node infos: %w", err))
+	}
+	status, victims := executor.Preempt(ctx, pg, nodes, podGroupInfo.UnscheduledPods)
 	if !status.IsSuccess() {
 		return status
 	}
@@ -621,11 +622,8 @@ func (sched *Scheduler) podGroupSchedulingPlacementAlgorithm(ctx context.Context
 				status: fwk.AsStatus(fmt.Errorf("failed to assume pod group placement: %w", err)),
 			}
 		}
-		result := sched.podGroupSchedulingDefaultAlgorithm(ctx, schedFwk, podGroupInfo, runAllPostFilter)
+		result := sched.podGroupSchedulingDefaultAlgorithm(ctx, schedFwk, podGroupInfo, runWithoutDefaultPreemption)
 		sched.nodeInfoSnapshot.ForgetPlacement()
-		if result.status.IsError() {
-			return result
-		}
 
 		results[i] = placementResult{
 			podGroupAlgorithmResult: result,
@@ -637,15 +635,38 @@ func (sched *Scheduler) podGroupSchedulingPlacementAlgorithm(ctx context.Context
 		}
 	}
 
-	if len(successfulResults) == 0 {
-		// We need to send events and set the status for pods in case all simulations were infeasible.
-		// The selection of which simulation we report is arbitrary for now, but may change in the future.
-		return results[0].podGroupAlgorithmResult
+	if len(successfulResults) > 0 {
+		// TODO: kubernetes/enhancements#5732 - run placement scorer plugins to select the best placement
+		return successfulResults[0].podGroupAlgorithmResult
 	}
 
-	// TODO: kubernetes/enhancements#5732 - run placement scorer plugins to select the best placement
-	return successfulResults[0].podGroupAlgorithmResult
+	// If we have not found feasible placement try workload aware preemption to find first feasible placement
+	if utilfeature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption) {
+		for i, placement := range placements {
+			logger.V(4).Info("Assuming placement in snapshot", "placement", placement.Name)
+			err := sched.nodeInfoSnapshot.AssumePlacement(placement)
+			if err != nil {
+				return podGroupAlgorithmResult{
+					status: fwk.AsStatus(fmt.Errorf("failed to assume pod group placement: %w", err)),
+				}
+			}
+			res := sched.workloadAwarePreemption(ctx, schedFwk, podGroupInfo) 
+			sched.nodeInfoSnapshot.ForgetPlacement()
+			
+			if res.IsSuccess() {
+				pgRes := results[i].podGroupAlgorithmResult
+				pgRes.waitingOnPreemption = true
+				return pgRes
+			}
+		} 
+  }
+
+	// If we have not found any feasible placement even with preemption, return the first result.
+	// We need to send events and set the status for pods in case all simulations were infeasible.
+	// The selection of which simulation we report is arbitrary for now, but may change in the future.
+	return results[0].podGroupAlgorithmResult
 }
+	
 
 // podGroupSchedulingAlgorithm attempts to schedule pods in the pod group according to the policy and constraints and returns the scheduling result for each pod in the pod group.
 func (sched *Scheduler) podGroupSchedulingAlgorithm(ctx context.Context, schedFwk framework.Framework, podGroupInfo *framework.QueuedPodGroupInfo, postFilterMode podGroupPostFilterMode) podGroupAlgorithmResult {

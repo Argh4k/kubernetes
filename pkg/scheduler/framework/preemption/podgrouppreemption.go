@@ -57,21 +57,17 @@ func NewPodGroupEvaluator(name string, fh fwk.Handle, podGroupSchedulingFunc fun
 }
 
 // Preempt implements the preemption logic where the preemptor is a pod group
-// and the domain is the whole cluster. It returns a status together with the list of victims
+// and the domain is the whole cluster / placement. It returns a status together with the list of victims
 // that should be preempted in order to make enough room for the pod group to be scheduled.
 // The preemption logic actuates the NodeInfo provided by a Handler
 // The caller is expected to snapshot the NodeInfo before calling this function
 // And rollback the state to the snapshot after function is finished.
-func (ev *PodGroupEvaluator) Preempt(ctx context.Context, pg *schedulingapi.PodGroup, cycleStates []fwk.CycleState, pods []*v1.Pod) (*fwk.Status, []*v1.Pod) {
-	// In case of workload-aware preemption, the domain is whole cluster.
+func (ev *PodGroupEvaluator) Preempt(ctx context.Context, pg *schedulingapi.PodGroup, nodes []fwk.NodeInfo, pods []*v1.Pod) (*fwk.Status, []*v1.Pod) {
+	// In case of workload-aware preemption, the domain is whole cluster / placement.
 	// We do not make a snapshot of node info. Those nodes will be shared
 	// with the PodGroup scheduling algorithm passed as podGroupSchedulingFunc.
-	allNodes, err := ev.Handler.SnapshotSharedLister().NodeInfos().List()
-	if err != nil {
-		return fwk.AsStatus(err), nil
-	}
-	domain := NewDomainForWorkloadPreemption(allNodes, "cluster-domain")
-	preemptor := NewPodGroupPreemptor(pg, pods, cycleStates)
+	domain := NewDomainForWorkloadPreemption(nodes, "cluster-domain")
+	preemptor := NewPodGroupPreemptor(pg, pods)
 	pdbs, err := getPodDisruptionBudgets(ev.PdbLister)
 	if err != nil {
 		return fwk.AsStatus(err), nil

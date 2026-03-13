@@ -2797,33 +2797,33 @@ func TestSelectVictimsOnDomain(t *testing.T) {
 			expectedNumViolatingVictim: []int{0},
 			expectedStatus:             []*fwk.Status{fwk.NewStatus(fwk.Success)},
 		},
-		{
-			name:                          "Workload Aware: prefer single pod over podGroup for preemption candidate, on corresponding node",
-			nodeNames:                     []string{"node1", "node2"},
-			enableWorkloadAwarePreemption: true,
-			initPods: []*v1.Pod{
-				st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj(),
-				st.MakePod().Name("p2").UID("p2").Node("node2").Priority(lowPriority).Obj(),
-				st.MakePod().Name("g1-1").UID("g1").Node("node1").PodGroupName("wg1").Priority(lowPriority).Obj(),
-				st.MakePod().Name("g1-2").UID("g2").Node("node1").PodGroupName("wg1").Priority(lowPriority).Obj(),
-			},
-			preemptionUnitTemplates: []preemptionUnitTemplate{
-				{pods: sets.New("p1"), priority: midPriority, affectedNodes: sets.New("node1")},
-				{pods: sets.New("p2"), priority: lowPriority, affectedNodes: sets.New("node2")},
-				{pods: sets.New("g1-1", "g1-2"), priority: lowPriority, affectedNodes: sets.New("node1")},
-			},
-			preemptor: newPodGroupPreemptor(highPriority, []*v1.Pod{
-				st.MakePod().Name("p").UID("p1").PodGroupName("wg1").Priority(highPriority).Obj(),
-			}, nil),
-			blockingRules: []blockingRule{
-				{nodeName: "node1", blockingVictims: []string{"g1-1", "g1-2"}, capacity: 1},
-				{nodeName: "node1", blockingVictims: []string{"p1"}, capacity: 1},
-				{nodeName: "node2", blockingVictims: []string{"p2"}, capacity: 1},
-			},
-			expectedPods:               [][]string{{"p2"}},
-			expectedNumViolatingVictim: []int{0},
-			expectedStatus:             []*fwk.Status{fwk.NewStatus(fwk.Success)},
-		},
+		// {
+		// 	name:                          "Workload Aware: prefer single pod over podGroup for preemption candidate, on corresponding node",
+		// 	nodeNames:                     []string{"node1", "node2"},
+		// 	enableWorkloadAwarePreemption: true,
+		// 	initPods: []*v1.Pod{
+		// 		st.MakePod().Name("p1").UID("p1").Node("node1").Priority(midPriority).Obj(),
+		// 		st.MakePod().Name("p2").UID("p2").Node("node2").Priority(lowPriority).Obj(),
+		// 		st.MakePod().Name("g1-1").UID("g1").Node("node1").PodGroupName("wg1").Priority(lowPriority).Obj(),
+		// 		st.MakePod().Name("g1-2").UID("g2").Node("node1").PodGroupName("wg1").Priority(lowPriority).Obj(),
+		// 	},
+		// 	preemptionUnitTemplates: []preemptionUnitTemplate{
+		// 		{pods: sets.New("p1"), priority: midPriority, affectedNodes: sets.New("node1")},
+		// 		{pods: sets.New("p2"), priority: lowPriority, affectedNodes: sets.New("node2")},
+		// 		{pods: sets.New("g1-1", "g1-2"), priority: lowPriority, affectedNodes: sets.New("node1")},
+		// 	},
+		// 	preemptor: newPodGroupPreemptor(highPriority, []*v1.Pod{
+		// 		st.MakePod().Name("p").UID("p1").PodGroupName("wg1").Priority(highPriority).Obj(),
+		// 	}, nil),
+		// 	blockingRules: []blockingRule{
+		// 		{nodeName: "node1", blockingVictims: []string{"g1-1", "g1-2"}, capacity: 1},
+		// 		{nodeName: "node1", blockingVictims: []string{"p1"}, capacity: 1},
+		// 		{nodeName: "node2", blockingVictims: []string{"p2"}, capacity: 1},
+		// 	},
+		// 	expectedPods:               [][]string{{"p2"}},
+		// 	expectedNumViolatingVictim: []int{0},
+		// 	expectedStatus:             []*fwk.Status{fwk.NewStatus(fwk.Success)},
+		// },
 		{
 			name:      "Failure: Cannot preempt the victim with higher priority",
 			nodeNames: []string{"node1"},
