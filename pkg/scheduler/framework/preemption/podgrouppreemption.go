@@ -69,7 +69,8 @@ func (ev *PodGroupEvaluator) Preempt(ctx context.Context, pg *schedulingapi.PodG
 	if err != nil {
 		return fwk.AsStatus(err)
 	}
-	domain := NewDomainForWorkloadPreemption(allNodes, "cluster-domain")
+	pgLister := ev.Handler.SharedInformerFactory().Scheduling().V1alpha2().PodGroups().Lister()
+	domain := NewDomainForWorkloadPreemption(allNodes, pgLister, "cluster-domain")
 	preemptor := NewPodGroupPreemptor(pg, pods)
 	pdbs, err := getPodDisruptionBudgets(ev.PdbLister)
 	if err != nil {

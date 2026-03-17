@@ -22,6 +22,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	schedulingapi "k8s.io/api/scheduling/v1alpha2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	schedulinglisters "k8s.io/client-go/listers/scheduling/v1alpha2"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	fwk "k8s.io/kube-scheduler/framework"
@@ -173,15 +175,57 @@ func NewDomainForPodByPodPreemption(node fwk.NodeInfo, name string) Domain {
 	}
 }
 
-func NewDomainForWorkloadPreemption(nodes []fwk.NodeInfo, name string) Domain {
-	// TODO(Argh4k): PodGroups with a DisruptionMode == DisruptionModePodGroup
-	// should be treated as a single Victim.
-	// https://github.com/kubernetes/kubernetes/pull/136589
+type pgVictim struct {
+	podInfo   []fwk.PodInfo
+	nodeInfo  []fwk.NodeInfo
+	nodeNames sets.Set[string]
+}
+
+func (v *pgVictim) add(pod fwk.PodInfo, node fwk.NodeInfo) {
+	v.podInfo = append(v.podInfo, pod)
+	if nodeName := node.Node().GetName(); !v.nodeNames.Has(nodeName) {
+		v.nodeNames.Insert(nodeName)
+		v.nodeInfo = append(v.nodeInfo, node)
+	}
+}
+
+// getAtomicPodGroupName returns the name of the PodGroup to which the given Pod belongs.
+// If the Pod does not belong to a PodGroup, or if the PodGroup is not in DisruptionModePodGroup,
+// an empty string is returned.
+func getAtomicPodGroupName(pod *v1.Pod, pgLister schedulinglisters.PodGroupLister) string {
+	if pod.Spec.SchedulingGroup == nil || pod.Spec.SchedulingGroup.PodGroupName == nil || *pod.Spec.SchedulingGroup.PodGroupName == "" {
+		return ""
+	}
+	pgName := *pod.Spec.SchedulingGroup.PodGroupName
+	pg, err := pgLister.PodGroups(pod.Namespace).Get(pgName)
+	if err != nil {
+		return ""
+	}
+	if pg.Spec.DisruptionMode != nil && *pg.Spec.DisruptionMode == schedulingapi.DisruptionModePodGroup {
+		return pgName
+	}
+	return ""
+}
+
+func NewDomainForWorkloadPreemption(nodes []fwk.NodeInfo, pgLister schedulinglisters.PodGroupLister, name string) Domain {
+	pgVictims := make(map[string]*pgVictim)
 	allPossibleVictims := make([]Victim, 0, len(nodes))
+
 	for _, node := range nodes {
 		for _, p := range node.GetPods() {
-			allPossibleVictims = append(allPossibleVictims, NewVictim([]fwk.PodInfo{p}, corev1helpers.PodPriority(p.GetPod()), []fwk.NodeInfo{node}))
+			if pgName := getAtomicPodGroupName(p.GetPod(), pgLister); pgName != "" {
+				if _, ok := pgVictims[pgName]; !ok {
+					pgVictims[pgName] = &pgVictim{nodeNames: sets.New[string]()}
+				}
+				pgVictims[pgName].add(p, node)
+			} else {
+				allPossibleVictims = append(allPossibleVictims, NewVictim([]fwk.PodInfo{p}, corev1helpers.PodPriority(p.GetPod()), []fwk.NodeInfo{node}))
+			}
 		}
+	}
+
+	for _, v := range pgVictims {
+		allPossibleVictims = append(allPossibleVictims, NewVictim(v.podInfo, corev1helpers.PodPriority(v.podInfo[0].GetPod()), v.nodeInfo))
 	}
 
 	return &domain{
