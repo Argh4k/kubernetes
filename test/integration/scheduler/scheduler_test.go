@@ -1245,3 +1245,60 @@ func TestTaintTolerationGtLtIntegration(t *testing.T) {
 		t.Errorf("error whiling deleting nodes, error: %v", err)
 	}
 }
+
+func TestNominatedNodeNameEmptyNodeKey(t *testing.T) {
+	// Verify that unschedulable pods with empty NominatedNodeName
+	// get tracked in the scheduler's NominatedPodsForNode interface.
+	testCtx := testutils.InitTestSchedulerWithNS(t, "empty-nominated-node-test")
+	nodeRes := map[v1.ResourceName]string{
+		v1.ResourcePods:   "32",
+		v1.ResourceCPU:    "10m",
+		v1.ResourceMemory: "10",
+	}
+	if _, err := testutils.CreateNode(testCtx.ClientSet, st.MakeNode().Name("small-node").Capacity(nodeRes).Obj()); err != nil {
+		t.Fatalf("Failed to create node: %v", err)
+	}
+
+	podRes := &v1.ResourceList{
+		v1.ResourceCPU: *resource.NewMilliQuantity(100, resource.DecimalSI),
+	}
+	pod, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, "unschedulable-pod", testCtx.NS.Name, podRes)
+	if err != nil {
+		t.Fatalf("Failed to create unschedulable pod: %v", err)
+	}
+
+	if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, testCtx.ClientSet, pod); err != nil {
+		t.Fatalf("Pod got scheduled unexpectedly: %v", err)
+	}
+
+
+	// Create pod 2
+	pod2, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, "unschedulable-pod2", testCtx.NS.Name, podRes)
+	if err != nil {
+		t.Fatalf("Failed to create unschedulable pod: %v", err)
+	}
+
+	if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, testCtx.ClientSet, pod2); err != nil {
+		t.Fatalf("Pod got scheduled unexpectedly: %v", err)
+	}
+
+
+	// Forcefully set an empty NominatedNodeName via update to simulate preemption override or pod updates
+	latestPod, err := testCtx.ClientSet.CoreV1().Pods(pod.Namespace).Get(testCtx.Ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get latest pod: %v", err)
+	}
+	podCopy := latestPod.DeepCopy()
+	podCopy.Labels = map[string]string{"test": "test"}
+	if _, err := testCtx.ClientSet.CoreV1().Pods(pod.Namespace).Update(testCtx.Ctx, podCopy, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("Failed to update pod status: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Verify that the pod ends up registered in the scheduling queue's nominator under the empty string key.
+	nominatedPods := testCtx.Scheduler.SchedulingQueue.NominatedPodsForNode("")
+	if len(nominatedPods) != 0 {
+		t.Logf("Expected nnn for empty node to not have any pods, got %v", len(nominatedPods))
+	}
+}

@@ -73,7 +73,7 @@ func (npm *nominator) addNominatedPod(logger klog.Logger, pi fwk.PodInfo, nomina
 func (npm *nominator) addNominatedPodUnlocked(logger klog.Logger, pi fwk.PodInfo, nominatingInfo *fwk.NominatingInfo) {
 	// Always delete the pod if it already exists, to ensure we never store more than
 	// one instance of the pod.
-	npm.deleteUnlocked(pi.GetPod())
+	npm.deleteUnlocked(&logger, pi.GetPod())
 
 	var nodeName string
 	if nominatingInfo.Mode() == fwk.ModeOverride {
@@ -112,6 +112,7 @@ func (npm *nominator) addNominatedPodUnlocked(logger klog.Logger, pi fwk.PodInfo
 func (npm *nominator) UpdateNominatedPod(logger klog.Logger, oldPod *v1.Pod, newPodInfo fwk.PodInfo) {
 	npm.nLock.Lock()
 	defer npm.nLock.Unlock()
+	
 	// In some cases, an Update event with no "NominatedNode" present is received right
 	// after a node("NominatedNode") is reserved for this pod in memory.
 	// In this case, we need to keep reserving the NominatedNode when updating the pod pointer.
@@ -129,23 +130,27 @@ func (npm *nominator) UpdateNominatedPod(logger klog.Logger, oldPod *v1.Pod, new
 			}
 		}
 	}
+	logger.V(3).Info("Updating nominated pod", "pod", klog.KObj(oldPod), "newPodInfo", newPodInfo)
 	// We update irrespective of the nominatedNodeName changed or not, to ensure
 	// that pod pointer is updated.
-	npm.deleteUnlocked(oldPod)
+	npm.deleteUnlocked(&logger, oldPod)
 	npm.addNominatedPodUnlocked(logger, newPodInfo, nominatingInfo)
 }
 
 // DeleteNominatedPodIfExists deletes <pod> from nominatedPods.
 func (npm *nominator) DeleteNominatedPodIfExists(pod *v1.Pod) {
 	npm.nLock.Lock()
-	npm.deleteUnlocked(pod)
+	npm.deleteUnlocked(nil, pod)
 	npm.nLock.Unlock()
 }
 
-func (npm *nominator) deleteUnlocked(p *v1.Pod) {
+func (npm *nominator) deleteUnlocked(logger *klog.Logger, p *v1.Pod) {
 	nnn, ok := npm.nominatedPodToNode[p.UID]
 	if !ok {
 		return
+	}
+	if nnn == "" && logger != nil {
+		(*logger).V(3).Info("About to go through for deletion of a pod with nnn=\"\"", "len", len(npm.nominatedPods[nnn]))
 	}
 	for i, np := range npm.nominatedPods[nnn] {
 		if np.uid == p.UID {
