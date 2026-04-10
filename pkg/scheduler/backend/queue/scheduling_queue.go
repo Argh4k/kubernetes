@@ -146,6 +146,7 @@ type SchedulingQueue interface {
 	GetPod(name, namespace string) (*framework.QueuedPodInfo, bool)
 	PendingPods() ([]*v1.Pod, string)
 	InFlightPods() []*v1.Pod
+	InFlightEvents() []interface{}
 	PodsInActiveQ() []*v1.Pod
 	// PodsInBackoffQ returns all the Pods in the backoffQ.
 	PodsInBackoffQ() []*v1.Pod
@@ -1064,6 +1065,13 @@ func (p *PriorityQueue) InFlightPods() []*v1.Pod {
 		return nil
 	}
 	return p.activeQ.listInFlightPods()
+}
+
+func (p *PriorityQueue) InFlightEvents() []interface{} {
+	if !p.isSchedulingQueueHintEnabled {
+		return nil
+	}
+	return p.activeQ.listInFlightEvents()
 }
 
 // isPodUpdated checks if the pod is updated in a way that it may have become
