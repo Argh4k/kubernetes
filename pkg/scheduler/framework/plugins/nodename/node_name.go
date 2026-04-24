@@ -72,6 +72,12 @@ func (pl *NodeName) Filter(ctx context.Context, _ fwk.CycleState, pod *v1.Pod, n
 	return nil
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface, always returning Success.
+func (pl *NodeName) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	// If the victim was running on this node it means that it can still run there.
+	return nil
+}
+
 // Fits actually checks if the pod fits the node.
 func Fits(pod *v1.Pod, nodeInfo fwk.NodeInfo) bool {
 	return len(pod.Spec.NodeName) == 0 || pod.Spec.NodeName == nodeInfo.Node().Name

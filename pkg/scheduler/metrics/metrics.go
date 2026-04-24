@@ -64,6 +64,8 @@ var ExtensionPoints = []string{
 	Permit,
 	Sign,
 	PlacementGenerate,
+	CanPlaceBack,
+	PodGroupPostFilter,
 }
 
 const (
@@ -86,6 +88,8 @@ const (
 	PlacementGenerate                = "PlacementGenerate"
 	PlacementScore                   = "PlacementScore"
 	PlacementScoreExtensionNormalize = "PlacementScoreExtensionNormalize"
+	CanPlaceBack                     = "CanPlaceBack"
+	PodGroupPostFilter               = "PodGroupPostFilter"
 )
 
 const (

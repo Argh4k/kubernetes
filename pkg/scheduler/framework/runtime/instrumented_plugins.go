@@ -37,6 +37,11 @@ func (p *instrumentedFilterPlugin) Filter(ctx context.Context, state fwk.CycleSt
 	return p.FilterPlugin.Filter(ctx, state, pod, nodeInfo)
 }
 
+func (p *instrumentedFilterPlugin) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	p.metric.Inc()
+	return p.FilterPlugin.CanPlaceBack(ctx, victimPod, nodeInfo, clusterNodes, preemptorPods)
+}
+
 type instrumentedPreFilterPlugin struct {
 	fwk.PreFilterPlugin
 

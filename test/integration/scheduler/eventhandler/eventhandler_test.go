@@ -67,6 +67,10 @@ func (pl *fooPlugin) Filter(ctx context.Context, state fwk.CycleState, pod *v1.P
 	return fwk.NewStatus(fwk.Unschedulable)
 }
 
+func (pl *fooPlugin) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	return nil
+}
+
 func (pl *fooPlugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
 	return []fwk.ClusterEventWithHint{
 		{Event: fwk.ClusterEvent{Resource: fwk.Node, ActionType: fwk.UpdateNodeTaint}},

@@ -2704,3 +2704,81 @@ func testComputePodResourceRequestWithNodeAllocatableDRA(tCtx ktesting.TContext)
 		})
 	}
 }
+
+func TestCanPlaceBack(t *testing.T) {
+	tCtx := ktesting.Init(t)
+	tests := []struct {
+		name                       string
+		victimPod                  *v1.Pod
+		nodeInfo                   *framework.NodeInfo
+		preemptorPods              []*v1.Pod
+		draExtendedResourceEnabled bool
+		wantStatus                 *fwk.Status
+	}{
+		{
+			name:      "victim pod requires DRA resource",
+			victimPod: newResourcePod(framework.Resource{ScalarResources: map[v1.ResourceName]int64{extendedResourceDRA: 1}}),
+			nodeInfo:  framework.NewNodeInfo(),
+			draExtendedResourceEnabled: true,
+			wantStatus: fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "Unsupported: victim pod requires DRA resources in preemption simulation"),
+		},
+		{
+			name:      "preemptor pod requires DRA resource",
+			victimPod: newResourcePod(framework.Resource{MilliCPU: 1}),
+			nodeInfo:  framework.NewNodeInfo(),
+			preemptorPods: []*v1.Pod{
+				newResourcePod(framework.Resource{ScalarResources: map[v1.ResourceName]int64{extendedResourceDRA: 1}}),
+			},
+			draExtendedResourceEnabled: true,
+			wantStatus: fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "Unsupported: preemptor pod requires DRA resources in preemption simulation"),
+		},
+		{
+			name:      "normal fit success",
+			victimPod: newResourcePod(framework.Resource{MilliCPU: 1, Memory: 1}),
+			nodeInfo:  framework.NewNodeInfo(),
+			wantStatus: nil,
+		},
+		{
+			name:      "normal fit failure",
+			victimPod: newResourcePod(framework.Resource{MilliCPU: 1, Memory: 1}),
+			nodeInfo: framework.NewNodeInfo(
+				newResourcePod(framework.Resource{MilliCPU: 10, Memory: 20})),
+			wantStatus: fwk.NewStatus(fwk.Unschedulable, getErrReason(v1.ResourceCPU), getErrReason(v1.ResourceMemory)),
+		},
+	}
+
+	for _, test := range tests {
+		tCtx.SyncTest(test.name, func(tCtx ktesting.TContext) {
+			featuregatetesting.SetFeatureGateDuringTest(tCtx, utilfeature.DefaultFeatureGate, features.DRAExtendedResource, test.draExtendedResourceEnabled)
+			
+			// Setup node capacity
+			node := v1.Node{Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 5, 20, 5), Allocatable: makeAllocatableResources(10, 20, 32, 5, 20, 5)}}
+			if test.nodeInfo == nil {
+				test.nodeInfo = framework.NewNodeInfo()
+			}
+			test.nodeInfo.SetNode(&node)
+
+			runOpts := []runtime.Option{}
+			var testDRAManager *dynamicresources.DefaultDRAManager
+			if test.draExtendedResourceEnabled {
+				testDRAManager = newTestDRAManager(tCtx, deviceClassWithExtendResourceName)
+				runOpts = append(runOpts, runtime.WithSharedDRAManager(testDRAManager))
+			}
+			
+			fh, _ := runtime.NewFramework(tCtx, nil, nil, runOpts...)
+			defer func() {
+				tCtx.Cancel("test has completed")
+				runtime.WaitForShutdown(fh)
+			}()
+
+			p, err := NewFit(tCtx, &config.NodeResourcesFitArgs{ScoringStrategy: defaultScoringStrategy}, fh, plfeature.Features{EnableDRAExtendedResource: test.draExtendedResourceEnabled})
+			tCtx.ExpectNoError(err, "create fit plugin")
+
+			gotStatus := p.(fwk.FilterPlugin).CanPlaceBack(tCtx, test.victimPod, test.nodeInfo, nil, test.preemptorPods)
+			
+			if diff := cmp.Diff(test.wantStatus, gotStatus); diff != "" {
+				tCtx.Errorf("status does not match (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}

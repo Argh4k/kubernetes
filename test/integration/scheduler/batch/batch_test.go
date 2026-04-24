@@ -465,6 +465,10 @@ func (pl *testPluginNoSign) Filter(ctx context.Context, state fwk.CycleState, po
 	return nil
 }
 
+func (pl *testPluginNoSign) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	return nil
+}
+
 func newNoSignPlugin(_ context.Context, injArgs runtime.Object, f fwk.Handle) (fwk.Plugin, error) {
 	return &testPluginNoSign{}, nil
 }
@@ -479,6 +483,10 @@ func (pl *testPluginEmptySign) Name() string {
 }
 
 func (pl *testPluginEmptySign) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
+	return nil
+}
+
+func (pl *testPluginEmptySign) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
 	return nil
 }
 

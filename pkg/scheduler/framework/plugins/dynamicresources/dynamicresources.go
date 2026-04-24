@@ -721,6 +721,15 @@ func getPodGroupStateData(cs fwk.CycleState) (*podGroupStateData, error) {
 	return s, nil
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *DynamicResources) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	// As of right now DRA plugin does not support simulating the claim deallocation during preemption.
+	// This means that even when we simulate the victim removal in preemption, it's not possible for
+	// the preemptor pod to "steal" the device as it's still considered allocated.
+	// So from DRA perspective the device should still be available and Pod can be placed back in it's original place.
+	return nil
+}
+
 // Filter invoked at the filter extension point.
 // It evaluates if a pod can fit due to the resources it requests,
 // for both allocated and unallocated claims.

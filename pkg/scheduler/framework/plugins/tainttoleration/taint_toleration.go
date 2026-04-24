@@ -98,6 +98,12 @@ func (pl *TaintToleration) isSchedulableAfterNodeChange(logger klog.Logger, pod 
 	return fwk.QueueSkip, nil
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *TaintToleration) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	// If the pod was running on a node, it can continue running there.
+	return nil
+}
+
 // Filter invoked at the filter extension point.
 func (pl *TaintToleration) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
 	logger := klog.FromContext(ctx)

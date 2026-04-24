@@ -287,7 +287,11 @@ func (sched *Scheduler) runWorkloadAwarePreemption(ctx context.Context, schedFwk
 			ProposedAssignments: makeProposedAssignments(&res),
 		}, res.status
 	}
-	return plugins[0].PodGroupPostFilter(ctx, pg, podGroupInfo.UnscheduledPods, pgSchedulingFunc)
+
+	startTime := time.Now()
+	status := plugins[0].PodGroupPostFilter(ctx, pg, podGroupInfo.UnscheduledPods, pgSchedulingFunc)
+	metrics.PluginExecutionDuration.WithLabelValues(plugins[0].Name(), metrics.PodGroupPostFilter, status.Code().String()).Observe(metrics.SinceInSeconds(startTime))
+	return status
 }
 
 // algorithmResult stores the scheduling result and status for a scheduling attempt of a single pod.

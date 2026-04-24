@@ -202,6 +202,12 @@ func (pl *NodeAffinity) PreFilterExtensions() fwk.PreFilterExtensions {
 	return nil
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *NodeAffinity) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	// If the victim was running on this node it means that it can still run there.
+	return nil
+}
+
 // Filter checks if the Node matches the Pod .spec.affinity.nodeAffinity and
 // the plugin's added affinity.
 func (pl *NodeAffinity) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {

@@ -146,6 +146,22 @@ func (pl *NodePorts) isSchedulableAfterAssignedPodDeleted(logger klog.Logger, po
 	return fwk.Queue, nil
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+// It verifies that the host port that victim was using is still available (not stolen by preemptors).
+func (pl *NodePorts) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	wantPorts := util.GetHostPorts(victimPod)
+	if len(wantPorts) == 0 {
+		return nil
+	}
+
+	fits := fitsPorts(wantPorts, nodeInfo.GetUsedPorts())
+	if !fits {
+		return fwk.NewStatus(fwk.Unschedulable, ErrReason)
+	}
+
+	return nil
+}
+
 // Filter invoked at the filter extension point.
 func (pl *NodePorts) Filter(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
 	wantPorts, err := getPreFilterState(cycleState)

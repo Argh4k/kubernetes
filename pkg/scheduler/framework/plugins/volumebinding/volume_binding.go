@@ -409,6 +409,11 @@ func getStateData(cs fwk.CycleState) (*stateData, error) {
 // If storage capacity tracking is enabled, then enough space has to be available
 // for the node and volumes that still need to be created.
 //
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *VolumeBinding) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	return nil
+}
+
 // The predicate returns true if all bound PVCs have compatible PVs with the node, and if all unbound
 // PVCs can be matched with an available and node-compatible PV.
 func (pl *VolumeBinding) Filter(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {

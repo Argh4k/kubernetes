@@ -1483,3 +1483,90 @@ func mustNewPodInfo(t *testing.T, pod *v1.Pod) *framework.PodInfo {
 	}
 	return podInfo
 }
+
+func TestCanPlaceBack(t *testing.T) {
+	podLabel := map[string]string{"service": "securityscan"}
+	victimPod := st.MakePod().Namespace("default").Labels(podLabel).Obj()
+
+	node1 := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1", Labels: map[string]string{"zone": "z1"}}}
+	node2 := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2", Labels: map[string]string{"zone": "z1"}}}
+	node3 := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node3", Labels: map[string]string{"zone": "z2"}}}
+
+	tests := []struct {
+		name          string
+		victimPod     *v1.Pod
+		nodeInfo      *v1.Node
+		clusterNodes  []*v1.Node
+		preemptorPods []*v1.Pod
+		wantStatus    *fwk.Status
+	}{
+		{
+			name:          "no preemptor pods",
+			victimPod:     victimPod,
+			nodeInfo:      node1,
+			clusterNodes:  []*v1.Node{node1},
+			preemptorPods: nil,
+			wantStatus:    nil,
+		},
+		{
+			name:      "preemptor has anti-affinity matching victim on same topology",
+			victimPod: victimPod,
+			nodeInfo:  node1,
+			clusterNodes: []*v1.Node{node1, node2},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().Namespace("default").Node("node2").
+					PodAntiAffinityIn("service", "zone", []string{"securityscan"}, st.PodAntiAffinityWithRequiredReq).Obj(),
+			},
+			wantStatus: fwk.NewStatus(fwk.Unschedulable, "placing back victim pod breaks anti-affinity rules of assumed preemptor pods"),
+		},
+		{
+			name:      "preemptor has anti-affinity matching victim on different topology",
+			victimPod: victimPod,
+			nodeInfo:  node1,
+			clusterNodes: []*v1.Node{node1, node3},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().Namespace("default").Node("node3").
+					PodAntiAffinityIn("service", "zone", []string{"securityscan"}, st.PodAntiAffinityWithRequiredReq).Obj(),
+			},
+			wantStatus: nil,
+		},
+		{
+			name:      "preemptor has anti-affinity but doesn't match victim",
+			victimPod: victimPod,
+			nodeInfo:  node1,
+			clusterNodes: []*v1.Node{node1, node2},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().Namespace("default").Node("node2").
+					PodAntiAffinityIn("service", "zone", []string{"non-matching"}, st.PodAntiAffinityWithRequiredReq).Obj(),
+			},
+			wantStatus: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := cache.NewSnapshot(nil, tt.clusterNodes)
+			nodeInfos, err := snapshot.NodeInfos().List()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			p := plugintesting.SetupPluginWithInformers(ctx, t, schedruntime.FactoryAdapter(feature.Features{}, New), &config.InterPodAffinityArgs{}, snapshot, nil)
+			
+			nodeInfo, err := snapshot.NodeInfos().Get(tt.nodeInfo.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			gotStatus := p.(fwk.FilterPlugin).CanPlaceBack(ctx, tt.victimPod, nodeInfo, nodeInfos, tt.preemptorPods)
+
+			if diff := cmp.Diff(tt.wantStatus, gotStatus); diff != "" {
+				t.Errorf("CanPlaceBack: status does not match (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}

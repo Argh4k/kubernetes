@@ -237,15 +237,22 @@ func (pl *CSILimits) isSchedulableAfterCSINodeUpdated(logger klog.Logger, pod *v
 //
 // If the pod haven't those types of volumes, we'll skip the Filter phase
 func (pl *CSILimits) PreFilter(ctx context.Context, _ fwk.CycleState, pod *v1.Pod, _ []fwk.NodeInfo) (*fwk.PreFilterResult, *fwk.Status) {
+	if pl.hasAttachableVolumes(pod) {
+		return nil, nil
+	}
+
+	return nil, fwk.NewStatus(fwk.Skip)
+}
+
+func (pl *CSILimits) hasAttachableVolumes(pod *v1.Pod) bool {
 	volumes := pod.Spec.Volumes
 	for i := range volumes {
 		vol := &volumes[i]
 		if vol.PersistentVolumeClaim != nil || vol.Ephemeral != nil || pl.translator.IsInlineMigratable(vol) {
-			return nil, nil
+			return true
 		}
 	}
-
-	return nil, fwk.NewStatus(fwk.Skip)
+	return false
 }
 
 // PreFilterExtensions returns prefilter extensions, pod add and remove.
@@ -253,8 +260,34 @@ func (pl *CSILimits) PreFilterExtensions() fwk.PreFilterExtensions {
 	return nil
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *CSILimits) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	// Optimization: If none of the preemptor pods use attachable volumes, they cannot break CSILimits.
+	// Since the victim was already running on the node, it must have passed the limits before.
+	// So if preemptors don't add any volumes, it will still fit.
+	hasVol := false
+	for _, p := range preemptorPods {
+		if pl.hasAttachableVolumes(p) {
+			hasVol = true
+			break
+		}
+	}
+	if !hasVol {
+		return nil
+	}
+
+	// We decided to align with the current implementation of default preemption, which means the simulation
+	// will be conservative and might double-count volumes if the preemptor shares volumes with the victim,
+	// or if the victim's volumes are still in the API server (which they will be during simulation).
+	return pl.csiLimitsFit(ctx, victimPod, nodeInfo)
+}
+
 // Filter invoked at the filter extension point.
 func (pl *CSILimits) Filter(ctx context.Context, _ fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
+	return pl.csiLimitsFit(ctx, pod, nodeInfo)
+}
+
+func (pl *CSILimits) csiLimitsFit(ctx context.Context, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
 	// If the new pod doesn't have any volume attached to it, the predicate will always be true
 	if len(pod.Spec.Volumes) == 0 {
 		return nil
@@ -350,7 +383,6 @@ func (pl *CSILimits) Filter(ctx context.Context, _ fwk.CycleState, pod *v1.Pod, 
 			}
 		}
 	}
-
 	return nil
 }
 

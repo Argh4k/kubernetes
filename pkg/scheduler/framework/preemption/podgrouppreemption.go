@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	policy "k8s.io/api/policy/v1"
@@ -96,6 +95,7 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	pdbs []*policy.PodDisruptionBudget,
 	podGroupSchedulingFunc framework.PodGroupSchedulingFunc) (*extenderv1.Victims, *fwk.Status) {
 	logger := klog.FromContext(ctx)
+	logger.V(2).Info("Preempting pod group", "preemptor", klog.KObj(preemptor.podGroup))
 
 	// Ensure the preemptor is eligible to preempt other pods.
 	if ok, msg := ev.preemptorEligibleToPreemptOthers(ctx, preemptor); !ok {
@@ -120,12 +120,17 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 
 		return nil
 	}
-	addPods := func(v *victim) error {
-		for _, pi := range v.Pods() {
-			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
-			nodeInfo.AddPodInfo(pi)
-		}
 
+	removePod := func(rpi fwk.PodInfo) error {
+		nodeInfo := nameToNode[rpi.GetPod().Spec.NodeName]
+		if err := nodeInfo.RemovePod(logger, rpi.GetPod()); err != nil {
+			return err
+		}
+		return nil
+	}
+	addPod := func(api fwk.PodInfo) error {
+		nodeInfo := nameToNode[api.GetPod().Spec.NodeName]
+		nodeInfo.AddPodInfo(api)
 		return nil
 	}
 
@@ -163,7 +168,15 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	if !status.IsSuccess() {
 		return nil, status
 	}
-	maxScheduledCount := len(assignments.ProposedAssignments)
+
+	// Assume preemptor pods to their assigned nodes
+	logger.V(2).Info("Assuming preemptor pods")
+	for _, assing := range assignments.ProposedAssignments {
+		if nodeInfo, ok := nameToNode[assing.GetNodeName()]; ok {
+			newPi, _ := framework.NewPodInfo(assing.GetPod())
+			nodeInfo.AddPodInfo(newPi)
+		}
+	}
 
 	sort.Slice(potentialVictims, func(i, j int) bool {
 		return moreImportantVictim(potentialVictims[i], potentialVictims[j])
@@ -173,39 +186,29 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	numViolatingVictim := 0
 
 	reprieveVictim := func(v *victim) (bool, error) {
-		if err := addPods(v); err != nil {
-			return false, err
-		}
-
-		assignments, status := podGroupSchedulingFunc(ctx)
-		fits := status.IsSuccess()
-		scheduledCount := 0
-		if assignments != nil {
-			scheduledCount = len(assignments.ProposedAssignments)
-		}
-
-		// For a PodGroup using default scheduling algorithm it's possible to schedule more pods after reprieving.
-		// More in: https://github.com/kubernetes/kubernetes/pull/138757#discussion_r3199360621
-		maxScheduledCount = max(maxScheduledCount, scheduledCount)
-
-		// Do not reprieve the victim if it reduces the number of scheduled Pods for a PodGroup.
-		if scheduledCount < maxScheduledCount {
-			fits = false
-		}
-
-		if !fits {
-			if err := removePods(v); err != nil {
-				return false, err
+		canFit := true
+		podsToRollback := []fwk.PodInfo{}
+		for _, pi := range v.Pods() {
+			node := nameToNode[pi.GetPod().Spec.NodeName]
+			if s := ev.Handle.RunCanPlaceBackPlugins(ctx, pi.GetPod(), node, domain.nodes, preemptor.pods); !s.IsSuccess() {
+				canFit = false
+				break
+			} else {
+				addPod(pi)
+				podsToRollback = append(podsToRollback, pi)
 			}
-			var names []string
-			for _, p := range v.Pods() {
-				names = append(names, p.GetPod().Name)
-			}
-			pods := strings.Join(names, ",")
-			logger.V(6).Info("Pods are potential preemption victims on domain", "pods", pods, "domain", domain.GetName())
 		}
-
-		return fits, nil
+		if !canFit {
+			logger.V(2).Info("Not reprieving victim")
+			for _, pi := range podsToRollback {
+				if err := removePod(pi); err != nil {
+					return false, err
+				}
+			}
+			return false, nil
+		}
+		logger.V(2).Info("Reprieved victim")
+		return true, nil
 	}
 
 	// Try to reprieve as many pods as possible. We first try to reprieve the PDB

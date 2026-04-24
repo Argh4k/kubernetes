@@ -124,6 +124,17 @@ func (fp *tokenFilter) PreFilterExtensions() fwk.PreFilterExtensions {
 	return fp
 }
 
+func (fp *tokenFilter) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	totalPods := 0
+	for _, n := range clusterNodes {
+		totalPods += len(n.GetPods())
+	}
+	if totalPods+1 > fp.Tokens {
+		return fwk.NewStatus(fwk.Unschedulable, "token limit broken")
+	}
+	return nil
+}
+
 var _ fwk.FilterPlugin = &tokenFilter{}
 
 // TestPreemption tests a few preemption scenarios.
@@ -1612,6 +1623,15 @@ func (rp *reservingPlugin) AddPod(ctx context.Context, state fwk.CycleState, pod
 func (rp *reservingPlugin) RemovePod(ctx context.Context, state fwk.CycleState, podToSchedule *v1.Pod, podInfoToRemove fwk.PodInfo, nodeInfo fwk.NodeInfo) *fwk.Status {
 	if strings.Contains(podInfoToRemove.GetPod().Name, rp.nameOfPodToReserve) {
 		state.Write(reservingPluginStateKey, reservingPluginState{reserved: false})
+	}
+	return nil
+}
+
+func (rp *reservingPlugin) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	for _, p := range nodeInfo.GetPods() {
+		if strings.Contains(p.GetPod().Name, rp.nameOfPodToReserve) {
+			return fwk.NewStatus(fwk.Unschedulable, "resources are reserved")
+		}
 	}
 	return nil
 }

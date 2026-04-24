@@ -407,6 +407,67 @@ func satisfyPodAffinity(state *preFilterState, nodeInfo fwk.NodeInfo) bool {
 	return true
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *InterPodAffinity) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	if len(preemptorPods) == 0 {
+		return nil
+	}
+
+	logger := klog.FromContext(ctx)
+	victimNsLabels := GetNamespaceLabelsSnapshot(logger, victimPod.Namespace, pl.nsLister)
+
+	hasAntiAffinity := false
+	for _, preemptor := range preemptorPods {
+		if preemptor.Spec.Affinity != nil && preemptor.Spec.Affinity.PodAntiAffinity != nil {
+			hasAntiAffinity = true
+			break
+		}
+	}
+	if !hasAntiAffinity {
+		return nil
+	}
+
+	nodeMap := make(map[string]fwk.NodeInfo, len(clusterNodes))
+	for _, n := range clusterNodes {
+		nodeMap[n.Node().Name] = n
+	}
+
+	for _, preemptor := range preemptorPods {
+		if preemptor.Spec.Affinity == nil || preemptor.Spec.Affinity.PodAntiAffinity == nil {
+			continue
+		}
+
+		antiTerms, err := fwk.GetAffinityTerms(preemptor, fwk.GetPodAntiAffinityTerms(preemptor.Spec.Affinity))
+		if err != nil {
+			return fwk.AsStatus(err)
+		}
+
+		for _, term := range antiTerms {
+			if term.Matches(victimPod, victimNsLabels) {
+				preemptorNodeName := preemptor.Spec.NodeName
+				if preemptorNodeName == "" {
+					continue
+				}
+
+				preemptorNodeInfo, ok := nodeMap[preemptorNodeName]
+				if !ok {
+					logger.V(3).Info("Preemptor node not found in clusterNodes", "nodeName", preemptorNodeName)
+					continue
+				}
+
+				preemptorTopologyValue, ok1 := preemptorNodeInfo.Node().Labels[term.TopologyKey]
+				victimTopologyValue, ok2 := nodeInfo.Node().Labels[term.TopologyKey]
+
+				if ok1 && ok2 && preemptorTopologyValue == victimTopologyValue {
+					return fwk.NewStatus(fwk.Unschedulable, "placing back victim pod breaks anti-affinity rules of assumed preemptor pods")
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // Filter invoked at the filter extension point.
 // It checks if a pod can be scheduled on the specified node with pod affinity/anti-affinity configuration.
 func (pl *InterPodAffinity) Filter(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {

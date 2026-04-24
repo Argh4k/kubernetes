@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	schedulinglisters "k8s.io/client-go/listers/scheduling/v1alpha2"
+	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
@@ -55,6 +56,18 @@ func (m *mockPodGroupNamespaceLister) Get(name string) (*schedulingapi.PodGroup,
 		return pg, nil
 	}
 	return nil, fmt.Errorf("pod group %s not found", name)
+}
+
+type dummyHandle struct {
+	fwk.Handle
+	canPlaceBack func(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status
+}
+
+func (d dummyHandle) RunCanPlaceBackPlugins(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	if d.canPlaceBack != nil {
+		return d.canPlaceBack(ctx, victimPod, nodeInfo, clusterNodes, preemptorPods)
+	}
+	return fwk.NewStatus(fwk.Success)
 }
 
 func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
@@ -951,6 +964,7 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 				}
 
 				availableSlots := 0
+				placement := make(fwk.TargetedPlacement)
 				nodeMap := make(map[string]fwk.NodeInfo)
 				for _, n := range domainNodes {
 					nodeMap[n.Node().Name] = n
@@ -973,7 +987,13 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 
 					// If all blocking victims are removed, the node provides its capacity.
 					if !isBlocked {
-						availableSlots += rule.capacity
+						// For each slot the node provides, assign one preemptor if we haven't assigned them all.
+						for i := 0; i < rule.capacity; i++ {
+							if availableSlots < neededSlots {
+								placement[tt.preemptor.Members()[availableSlots].UID] = rule.nodeName
+								availableSlots++
+							}
+						}
 					}
 				}
 
@@ -986,7 +1006,49 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 				return nil, fwk.NewStatus(fwk.Unschedulable)
 			}
 
-			pl := &PodGroupEvaluator{}
+			dummyHdr := dummyHandle{
+				canPlaceBack: func(ctx context.Context, victimPod *v1.Pod, ni fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+					pi, _ := framework.NewPodInfo(victimPod)
+					ni.AddPodInfo(pi)
+					defer ni.RemovePod(klog.Background(), victimPod) // ensure rollback
+
+					nodeName := ni.Node().Name
+					var rule *blockingRule
+					for _, r := range tt.blockingRules {
+						if r.nodeName == nodeName {
+							rule = &r
+							break
+						}
+					}
+
+					if rule == nil {
+						return fwk.NewStatus(fwk.Success)
+					}
+
+					isBlocked := false
+					for _, pod := range ni.GetPods() {
+						if rule.blockingVictims.Has(pod.GetPod().Name) {
+							isBlocked = true
+							break
+						}
+					}
+
+					if isBlocked {
+						// Check if any of the pods on the node are preemptors
+						for _, pod := range ni.GetPods() {
+							for _, preemptor := range preemptorPods {
+								if pod.GetPod().UID == preemptor.UID {
+									return fwk.NewStatus(fwk.Unschedulable)
+								}
+							}
+						}
+					}
+
+					return fwk.NewStatus(fwk.Success)
+				},
+			}
+
+			pl := &PodGroupEvaluator{Handle: dummyHdr}
 
 			victims, gotStatus := pl.selectVictimsOnDomain(ctx, tt.preemptor, domain, tt.pdbs, mockSchedulingFunc)
 			if !gotStatus.IsSuccess() {

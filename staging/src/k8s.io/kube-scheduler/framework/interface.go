@@ -172,6 +172,9 @@ func (s *Status) AppendReason(reason string) {
 	s.reasons = append(s.reasons, reason)
 }
 
+// TargetedPlacement maps the ID of a pod to the node name it is targeted to be placed on.
+type TargetedPlacement map[types.UID]string
+
 // IsSuccess returns true if and only if "Status" is nil or Code is "Success".
 func (s *Status) IsSuccess() bool {
 	return s.Code() == Success
@@ -562,6 +565,11 @@ type FilterPlugin interface {
 	// nodes have been found and searching for more isn't necessary
 	// anymore.
 	Filter(ctx context.Context, state CycleState, pod *v1.Pod, nodeInfo NodeInfo) *Status
+	// CanPlaceBack is called by the scheduling framework during preemption.
+	// It checks if the given victimPod can still be placed on its node,
+	// assuming the preemptor pods in the preemptorPods list are placed on it.
+	// The clusterNodes reflects the node with the assumed preemptor pods already accounted for.
+	CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo NodeInfo, clusterNodes []NodeInfo, preemptorPods []*v1.Pod) *Status
 }
 
 // PostFilterPlugin is an interface for "PostFilter" plugins. These plugins are called
@@ -866,6 +874,9 @@ type Handle interface {
 
 	// RunFilterPluginsWithNominatedPods runs the set of configured filter plugins for nominated pod on the given node.
 	RunFilterPluginsWithNominatedPods(ctx context.Context, state CycleState, pod *v1.Pod, info NodeInfo) *Status
+
+	// RunCanPlaceBackPlugins runs the set of configured filter plugins CanPlaceBack method.
+	RunCanPlaceBackPlugins(ctx context.Context, pod *v1.Pod, nodeInfo NodeInfo, clusterNodes []NodeInfo, preemptorPods []*v1.Pod) *Status
 
 	// Extenders returns registered scheduler extenders.
 	Extenders() []Extender

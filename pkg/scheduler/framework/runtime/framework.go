@@ -1281,6 +1281,43 @@ func addGENominatedPods(ctx context.Context, fh fwk.Handle, pod *v1.Pod, state f
 	return podsAdded, stateOut, nodeInfoOut, nil
 }
 
+// RunCanPlaceBackPlugins runs the set of configured filter plugins using the lightweight CanPlaceBack verification.
+func (f *frameworkImpl) RunCanPlaceBackPlugins(
+	ctx context.Context,
+	victimPod *v1.Pod,
+	nodeInfo fwk.NodeInfo,
+	clusterNodes []fwk.NodeInfo,
+	preemptorPods []*v1.Pod,
+) *fwk.Status {
+	logger := klog.FromContext(ctx)
+	verboseLogs := logger.V(4).Enabled()
+	if verboseLogs {
+		logger = klog.LoggerWithName(logger, "CanPlaceBack")
+	}
+
+	for _, pl := range f.filterPlugins {
+		ctx := ctx
+		if verboseLogs {
+			logger := klog.LoggerWithName(logger, pl.Name())
+			ctx = klog.NewContext(ctx, logger)
+		}
+		
+		startTime := time.Now()
+		status := pl.CanPlaceBack(ctx, victimPod, nodeInfo, clusterNodes, preemptorPods)
+		f.metricsRecorder.ObservePluginDurationAsync(metrics.CanPlaceBack, pl.Name(), status.Code().String(), metrics.SinceInSeconds(startTime))
+
+		if !status.IsSuccess() {
+			if !status.IsRejected() {
+				status = fwk.AsStatus(fmt.Errorf("running %q filter plugin: %w", pl.Name(), status.AsError()))
+			}
+			status.SetPlugin(pl.Name())
+			return status
+		}
+	}
+
+	return nil
+}
+
 // RunPreScorePlugins runs the set of configured pre-score plugins. If any
 // of these plugins returns any status other than Success/Skip, the given pod is rejected.
 // When it returns Skip status, other fields in status are just ignored,

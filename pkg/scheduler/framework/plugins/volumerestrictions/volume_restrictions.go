@@ -303,6 +303,11 @@ func (pl *VolumeRestrictions) PreFilterExtensions() fwk.PreFilterExtensions {
 	return pl
 }
 
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+func (pl *VolumeRestrictions) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	return nil
+}
+
 // Filter invoked at the filter extension point.
 // It evaluates if a pod can fit due to the volumes it requests, and those that
 // are already mounted. If there is already a volume mounted on that node, another pod that uses the same volume

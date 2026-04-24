@@ -154,6 +154,10 @@ func (pl *TestPlugin) PreFilter(ctx context.Context, state fwk.CycleState, p *v1
 	return nil, nil
 }
 
+func (pl *TestPlugin) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	return fwk.NewStatus(fwk.Success)
+}
+
 func (pl *TestPlugin) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
 	return nil
 }
@@ -2655,7 +2659,8 @@ func TestPreEnqueue(t *testing.T) {
 					}
 					return nil, fwk.NewStatus(fwk.Unschedulable, "need to preempt")
 				}
-				p.PodGroupPostFilter(ctx, pg, podsToPreempt, pgSchedulingFunc)
+				status := p.PodGroupPostFilter(ctx, pg, podsToPreempt, pgSchedulingFunc)
+				t.Logf("PodGroupPostFilter status: %v (error: %v)", status, status.AsError())
 			} else {
 				p.PostFilter(ctx, state, tt.podToTriggerPreemption, filteredNodesStatuses)
 			}

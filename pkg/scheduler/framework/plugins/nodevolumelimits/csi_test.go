@@ -1408,3 +1408,105 @@ func TestVolumeLimitScalingGate(t *testing.T) {
 		})
 	}
 }
+
+func TestCSILimitsCanPlaceBack(t *testing.T) {
+	tests := []struct {
+		name          string
+		victimPod     *v1.Pod
+		existingPods  []*v1.Pod
+		preemptorPods []*v1.Pod
+		vaCount       int
+		maxVols       int32
+		driverNames   []string
+		limitSource   string
+		wantStatus    *fwk.Status
+	}{
+		{
+			name:        "normal fit success",
+			victimPod:   st.MakePod().PVC("csi-ebs.csi.aws.com-0").Obj(),
+			existingPods: []*v1.Pod{},
+			maxVols:     2,
+			driverNames: []string{ebsCSIDriverName},
+			limitSource: "csinode",
+			wantStatus:  nil,
+		},
+		{
+			name:        "fit failure exceeding limits",
+			victimPod:   st.MakePod().PVC("csi-ebs.csi.aws.com-0").Obj(),
+			existingPods: []*v1.Pod{
+				st.MakePod().PVC("csi-ebs.csi.aws.com-1").Obj(),
+				st.MakePod().PVC("csi-ebs.csi.aws.com-2").Obj(),
+			},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().PVC("csi-ebs.csi.aws.com-3").Obj(),
+			},
+			maxVols:     2,
+			driverNames: []string{ebsCSIDriverName},
+			limitSource: "csinode",
+			wantStatus:  fwk.NewStatus(fwk.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			name:        "double counting behavior (conservative)",
+			victimPod:   st.MakePod().PVC("csi-ebs.csi.aws.com-0").Obj(),
+			existingPods: []*v1.Pod{},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().PVC("csi-ebs.csi.aws.com-3").Obj(),
+			},
+			vaCount:     1,
+			maxVols:     1,
+			driverNames: []string{ebsCSIDriverName},
+			limitSource: "csinode",
+			wantStatus:  fwk.NewStatus(fwk.Unschedulable, ErrReasonMaxVolumeCountExceeded),
+		},
+		{
+			name:        "optimization: skip check when preemptors have no volumes",
+			victimPod:   st.MakePod().PVC("csi-ebs.csi.aws.com-0").Obj(),
+			existingPods: []*v1.Pod{
+				st.MakePod().PVC("csi-ebs.csi.aws.com-1").Obj(),
+				st.MakePod().PVC("csi-ebs.csi.aws.com-2").Obj(),
+			},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().Obj(),
+			},
+			maxVols:     2,
+			driverNames: []string{ebsCSIDriverName},
+			limitSource: "csinode",
+			wantStatus:  nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+						allPods := append([]*v1.Pod{}, test.existingPods...)
+			allPods = append(allPods, test.preemptorPods...)
+			node, csiNode := getNodeWithPodAndVolumeLimits(test.limitSource, allPods, test.maxVols, test.driverNames...)
+			if csiNode != nil {
+				enableMigrationOnNode(csiNode, csilibplugins.AWSEBSInTreePluginName)
+			}
+			csiTranslator := csitrans.New()
+			fakecli := buildFakeClientWithVALister(test.vaCount, test.driverNames...)
+			informerFactory := informers.NewSharedInformerFactory(fakecli, 0)
+			if err := informerFactory.Storage().V1().VolumeAttachments().Informer().AddIndexers(cache.Indexers{vaIndexKey: volumeAttachmentIndexer}); err != nil {
+				t.Error(err)
+			}
+			_, ctx := ktesting.NewTestContext(t)
+			informerFactory.Start(ctx.Done())
+			informerFactory.WaitForCacheSync(ctx.Done())
+			
+			p := &CSILimits{
+				csiManager:           NewCSIManager(getFakeCSINodeLister(csiNode)),
+				pvLister:             getFakeCSIPVLister("csi", test.driverNames...),
+				pvcLister:            getFakeCSIPVCLister("csi", scName, test.driverNames...),
+				scLister:             getFakeCSIStorageClassLister(scName, test.driverNames[0]),
+				vaIndexer:            informerFactory.Storage().V1().VolumeAttachments().Informer().GetIndexer(),
+				randomVolumeIDPrefix: rand.String(32),
+				translator:           csiTranslator,
+			}
+			
+			gotStatus := p.CanPlaceBack(ctx, test.victimPod, node, nil, test.preemptorPods)
+			if diff := cmp.Diff(test.wantStatus, gotStatus, statusCmpOpts...); diff != "" {
+				t.Errorf("CanPlaceBack status does not match (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}

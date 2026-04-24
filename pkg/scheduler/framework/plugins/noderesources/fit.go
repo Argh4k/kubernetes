@@ -625,6 +625,62 @@ func (f *Fit) Filter(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod
 	return nil
 }
 
+func hasDRAResources(pod *v1.Pod, nodeInfo fwk.NodeInfo, draManager fwk.SharedDRAManager, opts ResourceRequestsOptions) bool {
+	if !opts.EnableDRAExtendedResource {
+		return false
+	}
+	requests := computePodResourceRequest(pod, opts)
+	for rName := range requests.ScalarResources {
+		if shouldDelegateResourceToDRA(rName, nodeInfo, draManager, opts) {
+			return true
+		}
+	}
+	return false
+}
+
+// CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
+// It calculates whether the victimPod can still fit on the node alongside the preemptor assigned to that node.
+// It returns an error if either the victim pod or any of the preemptor pods require DRA resources.
+func (f *Fit) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
+	var draManager fwk.SharedDRAManager
+	if f.enableDRAExtendedResource {
+		draManager = f.handle.SharedDRAManager()
+	}
+
+	opts := ResourceRequestsOptions{
+		EnablePodLevelResources:   f.enablePodLevelResources,
+		EnableDRAExtendedResource: f.enableDRAExtendedResource,
+	}
+
+	if hasDRAResources(victimPod, nodeInfo, draManager, opts) {
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "Unsupported: victim pod requires DRA resources in preemption simulation")
+	}
+
+	for _, p := range preemptorPods {
+		if hasDRAResources(p, nodeInfo, draManager, opts) {
+			return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "Unsupported: preemptor pod requires DRA resources in preemption simulation")
+		}
+	}
+
+	insufficientResources := fitsRequest(computePodResourceRequest(victimPod, opts), nodeInfo, f.ignoredResources, f.ignoredResourceGroups, draManager, opts)
+
+	if len(insufficientResources) != 0 {
+		failureReasons := make([]string, 0, len(insufficientResources))
+		statusCode := fwk.Unschedulable
+		for i := range insufficientResources {
+			failureReasons = append(failureReasons, insufficientResources[i].Reason)
+
+			if insufficientResources[i].Unresolvable {
+				statusCode = fwk.UnschedulableAndUnresolvable
+			}
+		}
+
+		return fwk.NewStatus(statusCode, failureReasons...)
+	}
+
+	return nil
+}
+
 // InsufficientResource describes what kind of resource limit is hit and caused the pod to not fit the node.
 type InsufficientResource struct {
 	ResourceName v1.ResourceName
