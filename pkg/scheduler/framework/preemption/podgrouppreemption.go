@@ -170,7 +170,6 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	}
 
 	// Assume preemptor pods to their assigned nodes
-	logger.V(2).Info("Assuming preemptor pods")
 	for _, assing := range assignments.ProposedAssignments {
 		if nodeInfo, ok := nameToNode[assing.GetNodeName()]; ok {
 			newPi, _ := framework.NewPodInfo(assing.GetPod())
@@ -199,7 +198,6 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 			}
 		}
 		if !canFit {
-			logger.V(2).Info("Not reprieving victim")
 			for _, pi := range podsToRollback {
 				if err := removePod(pi); err != nil {
 					return false, err
@@ -207,7 +205,6 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 			}
 			return false, nil
 		}
-		logger.V(2).Info("Reprieved victim")
 		return true, nil
 	}
 

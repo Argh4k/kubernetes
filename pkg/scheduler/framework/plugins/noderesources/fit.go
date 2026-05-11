@@ -641,6 +641,7 @@ func hasDRAResources(pod *v1.Pod, nodeInfo fwk.NodeInfo, draManager fwk.SharedDR
 // CanPlaceBack implements the CanPlaceBack method for the FilterPlugin interface.
 // It calculates whether the victimPod can still fit on the node alongside the preemptor assigned to that node.
 // It returns an error if either the victim pod or any of the preemptor pods require DRA resources.
+// It does not work with InPlacePodVerticalScalingEnabled right now
 func (f *Fit) CanPlaceBack(ctx context.Context, victimPod *v1.Pod, nodeInfo fwk.NodeInfo, clusterNodes []fwk.NodeInfo, preemptorPods []*v1.Pod) *fwk.Status {
 	var draManager fwk.SharedDRAManager
 	if f.enableDRAExtendedResource {

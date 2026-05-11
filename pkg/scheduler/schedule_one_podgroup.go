@@ -290,7 +290,10 @@ func (sched *Scheduler) runWorkloadAwarePreemption(ctx context.Context, schedFwk
 
 	startTime := time.Now()
 	status := plugins[0].PodGroupPostFilter(ctx, pg, podGroupInfo.UnscheduledPods, pgSchedulingFunc)
-	metrics.PluginExecutionDuration.WithLabelValues(plugins[0].Name(), metrics.PodGroupPostFilter, status.Code().String()).Observe(metrics.SinceInSeconds(startTime))
+	endTime := metrics.SinceInSeconds(startTime)
+	logger := klog.FromContext(ctx)
+	logger.V(2).Info(fmt.Sprintf("Pod group post filter plugin execution time: %f", endTime))
+	metrics.PluginExecutionDuration.WithLabelValues(plugins[0].Name(), metrics.PodGroupPostFilter, status.Code().String()).Observe(endTime)
 	return status
 }
 
