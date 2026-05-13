@@ -23,7 +23,9 @@ import (
 	"maps"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -69,11 +71,17 @@ type WorkloadExecutor struct {
 	topicName                    string
 	nextNodeIndex                int
 	opts                         *schedulerPerfOptions
+	cpuProfileFile               *os.File
 }
 
 func (e *WorkloadExecutor) wait() {
 	e.collectorWG.Wait()
 	e.wg.Wait()
+	// if e.cpuProfileFile != nil {
+	// 	pprof.StopCPUProfile()
+	// 	e.cpuProfileFile.Close()
+	// 	e.cpuProfileFile = nil
+	// }
 }
 
 func (e *WorkloadExecutor) runOp(tCtx ktesting.TContext, op realOp, opIndex int) error {
@@ -98,6 +106,10 @@ func (e *WorkloadExecutor) runOp(tCtx ktesting.TContext, op realOp, opIndex int)
 		return e.runStartCollectingMetricsOp(tCtx, opIndex, concreteOp)
 	case *stopCollectingMetricsOp:
 		return e.runStopCollectingMetrics(tCtx, opIndex)
+	case *startCollectingCpuProfileOp:
+		return e.runStartCollectingCpuProfileOp(tCtx, opIndex, concreteOp)
+	case *stopCollectingCpuProfileOp:
+		return e.runStopCollectingCpuProfileOp(tCtx, opIndex)
 	case *createResourceDriverOp:
 		concreteOp.run(tCtx, e.scheduler.Profiles["default-scheduler"].SharedDRAManager())
 		return nil
@@ -458,6 +470,40 @@ func (e *WorkloadExecutor) runStartCollectingMetricsOp(tCtx ktesting.TContext, o
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (e *WorkloadExecutor) runStartCollectingCpuProfileOp(tCtx ktesting.TContext, opIndex int, op *startCollectingCpuProfileOp) error {
+	if e.cpuProfileFile != nil {
+		return fmt.Errorf("cpu profile collection is already ongoing")
+	}
+	if err := os.MkdirAll(filepath.Dir(op.FilePath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory for cpu profile: %w", err)
+	}
+	f, err := os.Create(op.FilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %q for cpu profile: %w", op.FilePath, err)
+	}
+	if err := pprof.StartCPUProfile(f); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to start cpu profile: %w", err)
+	}
+	e.cpuProfileFile = f
+	tCtx.Logf("Started CPU profile collection into %q", op.FilePath)
+	return nil
+}
+
+func (e *WorkloadExecutor) runStopCollectingCpuProfileOp(tCtx ktesting.TContext, opIndex int) error {
+	if e.cpuProfileFile == nil {
+		return fmt.Errorf("missing startCollectingCpuProfile operation before stopping")
+	}
+	pprof.StopCPUProfile()
+	err := e.cpuProfileFile.Close()
+	e.cpuProfileFile = nil
+	if err != nil {
+		return fmt.Errorf("failed to close cpu profile file: %w", err)
+	}
+	tCtx.Log("Stopped CPU profile collection")
 	return nil
 }
 

@@ -700,6 +700,48 @@ func (scm stopCollectingMetricsOp) patchParams(_ *Workload) (realOp, error) {
 	return &scm, nil
 }
 
+// startCollectingCpuProfileOp defines an op that starts CPU profile collection.
+// stopCollectingCpuProfileOp has to be used after this op to finish collecting.
+type startCollectingCpuProfileOp struct {
+	// Must be "startCollectingCpuProfile".
+	Opcode operationCode
+	// FilePath is the path to the output profile file.
+	FilePath string
+}
+
+func (sccp *startCollectingCpuProfileOp) isValid(_ bool) error {
+	if sccp.FilePath == "" {
+		return fmt.Errorf("filePath cannot be empty")
+	}
+	return nil
+}
+
+func (*startCollectingCpuProfileOp) collectsMetrics() bool {
+	return false
+}
+
+func (sccp startCollectingCpuProfileOp) patchParams(_ *Workload) (realOp, error) {
+	return &sccp, nil
+}
+
+// stopCollectingCpuProfileOp defines an op that stops CPU profile collection.
+type stopCollectingCpuProfileOp struct {
+	// Must be "stopCollectingCpuProfile".
+	Opcode operationCode
+}
+
+func (sccp *stopCollectingCpuProfileOp) isValid(_ bool) error {
+	return nil
+}
+
+func (*stopCollectingCpuProfileOp) collectsMetrics() bool {
+	return false
+}
+
+func (sccp stopCollectingCpuProfileOp) patchParams(_ *Workload) (realOp, error) {
+	return &sccp, nil
+}
+
 // resolveTemplateParams resolves the template parameters using the workload parameters.
 func resolveTemplateParams(templateParams map[string]any, w *Workload) (map[string]any, error) {
 	if len(templateParams) == 0 {

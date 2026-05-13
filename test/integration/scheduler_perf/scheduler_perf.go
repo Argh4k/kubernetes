@@ -74,9 +74,11 @@ const (
 	updateAnyOpcode              operationCode = "updateAny"
 	barrierOpcode                operationCode = "barrier"
 	sleepOpcode                  operationCode = "sleep"
-	startCollectingMetricsOpcode operationCode = "startCollectingMetrics"
-	stopCollectingMetricsOpcode  operationCode = "stopCollectingMetrics"
-	waitForPodGroupsOpcode       operationCode = "waitForPodGroups"
+	startCollectingMetricsOpcode    operationCode = "startCollectingMetrics"
+	stopCollectingMetricsOpcode     operationCode = "stopCollectingMetrics"
+	waitForPodGroupsOpcode          operationCode = "waitForPodGroups"
+	startCollectingCpuProfileOpcode operationCode = "startCollectingCpuProfile"
+	stopCollectingCpuProfileOpcode  operationCode = "stopCollectingCpuProfile"
 )
 
 const (
@@ -512,9 +514,11 @@ func (op *op) UnmarshalJSON(b []byte) error {
 		updateAnyOpcode:              &updateAny{},
 		barrierOpcode:                &barrierOp{},
 		sleepOpcode:                  &sleepOp{},
-		startCollectingMetricsOpcode: &startCollectingMetricsOp{},
-		stopCollectingMetricsOpcode:  &stopCollectingMetricsOp{},
-		waitForPodGroupsOpcode:       &waitForPodGroups{},
+		startCollectingMetricsOpcode:    &startCollectingMetricsOp{},
+		stopCollectingMetricsOpcode:     &stopCollectingMetricsOp{},
+		waitForPodGroupsOpcode:          &waitForPodGroups{},
+		startCollectingCpuProfileOpcode: &startCollectingCpuProfileOp{},
+		stopCollectingCpuProfileOpcode:  &stopCollectingCpuProfileOp{},
 		// TODO(#94601): add a delete nodes op to simulate scaling behaviour?
 	}
 	// First determine the opcode using lenient decoding (= ignore extra fields).

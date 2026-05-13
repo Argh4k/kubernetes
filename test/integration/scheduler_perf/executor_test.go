@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -995,4 +996,77 @@ func verifyNamespaceCreated(expectedNamespace string) verifyFunc {
 		}
 		return nil
 	}
+}
+
+func TestCpuProfileCollection(t *testing.T) {
+	t.Run("successful collection", func(t *testing.T) {
+		tCtx := ktesting.Init(t)
+		tempDir := t.TempDir()
+		profilePath := filepath.Join(tempDir, "cpu-profile.out")
+
+		exec := &WorkloadExecutor{}
+		startOp := &startCollectingCpuProfileOp{
+			Opcode:   startCollectingCpuProfileOpcode,
+			FilePath: profilePath,
+		}
+
+		if err := exec.runOp(tCtx, startOp, 0); err != nil {
+			t.Fatalf("Failed to start CPU profile collection: %v", err)
+		}
+		if exec.cpuProfileFile == nil {
+			t.Fatalf("Expected cpuProfileFile to be set, got nil")
+		}
+
+		stopOp := &stopCollectingCpuProfileOp{
+			Opcode: stopCollectingCpuProfileOpcode,
+		}
+		if err := exec.runOp(tCtx, stopOp, 0); err != nil {
+			t.Fatalf("Failed to stop CPU profile collection: %v", err)
+		}
+		if exec.cpuProfileFile != nil {
+			t.Fatalf("Expected cpuProfileFile to be nil after stop, got %v", exec.cpuProfileFile)
+		}
+		if _, err := os.Stat(profilePath); err != nil {
+			t.Fatalf("Expected profile file %q to exist, got error: %v", profilePath, err)
+		}
+	})
+
+	t.Run("start while already ongoing", func(t *testing.T) {
+		tCtx := ktesting.Init(t)
+		tempDir := t.TempDir()
+		profilePath := filepath.Join(tempDir, "cpu-profile.out")
+
+		exec := &WorkloadExecutor{}
+		startOp := &startCollectingCpuProfileOp{
+			Opcode:   startCollectingCpuProfileOpcode,
+			FilePath: profilePath,
+		}
+
+		if err := exec.runOp(tCtx, startOp, 0); err != nil {
+			t.Fatalf("Failed to start CPU profile collection: %v", err)
+		}
+		defer func() {
+			if exec.cpuProfileFile != nil {
+				pprof.StopCPUProfile()
+				exec.cpuProfileFile.Close()
+				exec.cpuProfileFile = nil
+			}
+		}()
+
+		if err := exec.runOp(tCtx, startOp, 0); err == nil {
+			t.Fatalf("Expected error starting profile collection while already ongoing, got nil")
+		}
+	})
+
+	t.Run("stop without starting", func(t *testing.T) {
+		tCtx := ktesting.Init(t)
+		exec := &WorkloadExecutor{}
+		stopOp := &stopCollectingCpuProfileOp{
+			Opcode: stopCollectingCpuProfileOpcode,
+		}
+
+		if err := exec.runOp(tCtx, stopOp, 0); err == nil {
+			t.Fatalf("Expected error stopping profile collection without starting, got nil")
+		}
+	})
 }
