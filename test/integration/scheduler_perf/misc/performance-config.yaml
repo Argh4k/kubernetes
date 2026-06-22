@@ -490,3 +490,96 @@
       nodesWithExtendedResource: 5000
       nodesWithoutExtendedResource: 0
       measurePods: 5000
+
+- name: WorkloadPodGroupPreemption
+  workloadTemplate:
+  - opcode: createNodes
+    countParam: $nodes
+  - opcode: createNamespaces
+    count: 1
+    prefix: default
+  - opcode: createAny
+    namespace: default-0
+    templatePath: templates/pg.yaml
+    countParam: $podGroupCount
+    templateParams:
+      podsCount: $pods
+  - opcode: createPods
+    countParam: $nodes
+    podTemplatePath: templates/pod-hostport.yaml
+  - opcode: startCollectingMetrics
+    namespaces: ["default-0"]
+  # - opcode: startCollectingProfile
+    # type: cpu
+    # filePath: "cpu-out.out"
+  - opcode: createPods
+    countParam: $pods
+    namespace: default-0
+    podTemplatePath: templates/pod-with-pg.yaml
+    skipWaitToCompletion: true
+    templateParams:
+      podGroupCount: $podGroupCount
+  - opcode: barrier
+  - opcode: sleep
+    duration: 10s
+  # - opcode: stopCollectingProfile
+    # type: cpu
+  - opcode: stopCollectingMetrics
+  workloads:
+  - name: default
+    featureGates:
+      GenericWorkload: true
+      GangScheduling: true
+      WorkloadAwarePreemption: true
+    labels: [performance, wap]
+    params:
+      nodes: 1000
+      pods: 1000
+      podGroupCount: 100
+
+# we will have podGroupCount PodGroups
+# Pods are assigned to a PodGroup based on the index // podGroupCount
+# minCount should be  pods / podGroupCount
+
+# - name: WWWorkloadPodGroupPreemptionCPUFull
+#   workloadTemplate:
+#   - opcode: createNodes
+#     countParam: $nodes
+#     nodeTemplatePath: ../templates/node-default.yaml
+#   - opcode: createNamespaces
+#     count: 1
+#     prefix: default
+#   - opcode: createAny
+#     namespace: default-0
+#     templatePath: templates/pg.yaml
+#     countParam: $podGroupCount
+#     templateParams:
+#       podsCount: $preemptorPods
+#   - opcode: createPods
+#     countParam: $initPods
+#     podTemplatePath: templates/pod-low-priority-1cpu.yaml
+#   - opcode: startCollectingMetrics
+#     namespaces: ["default-0"]
+#   - opcode: createPods
+#     countParam: $preemptorPods
+#     namespace: default-0
+#     podTemplatePath: templates/pod-with-pg-1cpu.yaml
+#     skipWaitToCompletion: true
+#     templateParams:
+#       podGroupCount: $podGroupCount
+#   - opcode: barrier
+#   - opcode: sleep
+#     duration: 10s
+#   - opcode: stopCollectingMetrics
+#   workloads:
+#   - name: default
+#     featureGates:
+#       GenericWorkload: true
+#       GangScheduling: true
+#       WorkloadAwarePreemption: true
+#     labels: [performance, wap]
+#     params:
+#       nodes: 1000
+#       initPods: 4000
+#       preemptorPods: 1000
+#       podGroupCount: 100

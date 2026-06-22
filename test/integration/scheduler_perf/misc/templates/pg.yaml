@@ -1,0 +1,9 @@
+apiVersion: scheduling.k8s.io/v1alpha3
+kind: PodGroup
+metadata:
+  name: pg-{{ .Index }}
+spec:
+  schedulingPolicy:
+    gang:
+      minCount: {{ DivideInt .podsCount .Count}}
+  priority: 1000
