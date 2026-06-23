@@ -2427,8 +2427,9 @@ type fakePodActivator struct {
 func (f *fakePodActivator) Activate(logger klog.Logger, pods map[string]*v1.Pod) {}
 
 type mockProposedAssignment struct {
-	nodeName string
-	pod      *v1.Pod
+	nodeName   string
+	pod        *v1.Pod
+	cycleState fwk.CycleState
 }
 
 func (pa *mockProposedAssignment) GetNodeName() string {
@@ -2437,6 +2438,10 @@ func (pa *mockProposedAssignment) GetNodeName() string {
 
 func (pa *mockProposedAssignment) GetPod() *v1.Pod {
 	return pa.pod
+}
+
+func (pa *mockProposedAssignment) GetCycleState() fwk.CycleState {
+	return pa.cycleState
 }
 
 func TestPreEnqueue(t *testing.T) {
@@ -2630,12 +2635,14 @@ func TestPreEnqueue(t *testing.T) {
 						return &fwk.PodGroupAssignments{
 							ProposedAssignments: []fwk.ProposedAssignment{
 								&mockProposedAssignment{
-									nodeName: "node1",
-									pod:      tt.podToTriggerPreemption,
+									pod:        tt.podToTriggerPreemption,
+									nodeName:   "node1",
+									cycleState: framework.NewCycleState(),
 								},
 								&mockProposedAssignment{
-									nodeName: "node1",
-									pod:      tt.podToCheck,
+									pod:        tt.podToCheck,
+									nodeName:   "node1",
+									cycleState: framework.NewCycleState(),
 								},
 							},
 						}, fwk.NewStatus(fwk.Success)
