@@ -118,8 +118,6 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 		return nil, fwk.NewStatus(fwk.Unschedulable, msg)
 	}
 
-	// Compared to the default preemption algorithm do not run the runPreFilterExtensionRemovePod
-	// or runPreFilterExtensionAddPod as pod group scheduling does prefilter anyway.
 	removePods := func(v *victim) error {
 		for _, pi := range v.Pods() {
 			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
@@ -127,15 +125,36 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 				return err
 			}
 		}
-
 		return nil
 	}
-	addPods := func(v *victim) error {
+
+	addPodsWithPreFilter := func(v *victim, preemptorAssignments *fwk.PodGroupAssignments) error {
 		for _, pi := range v.Pods() {
 			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
 			nodeInfo.AddPodInfo(pi)
+			for _, assignment := range preemptorAssignments.ProposedAssignments {
+				status := ev.Handle.RunPreFilterExtensionAddPod(ctx, assignment.GetCycleState(), assignment.GetPod(), pi, nodeInfo)
+				if !status.IsSuccess() {
+					return status.AsError()
+				}
+			}
 		}
+		return nil
+	}
 
+	removePodsWithPreFilter := func(v *victim, preemptorAssignments *fwk.PodGroupAssignments) error {
+		for _, pi := range v.Pods() {
+			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
+			if err := nodeInfo.RemovePod(logger, pi.GetPod()); err != nil {
+				return err
+			}
+			for _, assignment := range preemptorAssignments.ProposedAssignments {
+				status := ev.Handle.RunPreFilterExtensionRemovePod(ctx, assignment.GetCycleState(), assignment.GetPod(), pi, nodeInfo)
+				if !status.IsSuccess() {
+					return status.AsError()
+				}
+			}
+		}
 		return nil
 	}
 
@@ -173,7 +192,6 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	if !status.IsSuccess() {
 		return nil, status
 	}
-	maxScheduledCount := len(podGroupAssignments.ProposedAssignments)
 
 	sort.Slice(potentialVictims, func(i, j int) bool {
 		return moreImportantVictim(potentialVictims[i], potentialVictims[j])
@@ -182,30 +200,63 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	violatingVictims, nonViolatingVictims := filterVictimsWithPDBViolation(potentialVictims, pdbs)
 	numViolatingVictim := 0
 
-	reprieveVictim := func(v *victim) (bool, *fwk.PodGroupAssignments, error) {
-		if err := addPods(v); err != nil {
-			return false, nil, err
+	podInfoCache := make([]struct {
+		pi fwk.PodInfo
+		e  bool
+	}, len(podGroupAssignments.ProposedAssignments))
+	reprieveVictim := func(v *victim, preemptorAssignments *fwk.PodGroupAssignments) (bool, error) {
+		victimNames := ""
+		for _, pi := range v.Pods() {
+			victimNames += pi.GetPod().Name + ", "
 		}
-
-		assignments, status := podGroupSchedulingFunc(ctx)
-		fits := status.IsSuccess()
-		scheduledCount := 0
-		if assignments != nil {
-			scheduledCount = len(assignments.ProposedAssignments)
+		logger.Info("WAP: Reprieving for victim ", "victim", victimNames)
+		if err := addPodsWithPreFilter(v, preemptorAssignments); err != nil {
+			return false, err
 		}
+		cleanUpFn := []func(){}
+		fits := true
+		for i, assignment := range preemptorAssignments.ProposedAssignments {
+			if assignment.GetNodeName() == "" {
+				continue
+			}
+			nodeInfo := nameToNode[assignment.GetNodeName()]
+			logger.Info("WAP: running filter for pod on node", "podName", assignment.GetPod().Name, "nodeName", nodeInfo.Node().Name)
 
-		// For a PodGroup using default scheduling algorithm it's possible to schedule more pods after reprieving.
-		// More in: https://github.com/kubernetes/kubernetes/pull/138757#discussion_r3199360621
-		maxScheduledCount = max(maxScheduledCount, scheduledCount)
-
-		// Do not reprieve the victim if it reduces the number of scheduled Pods for a PodGroup.
-		if scheduledCount < maxScheduledCount {
-			fits = false
+			if s := ev.Handle.RunFilterPluginsWithNominatedPods(ctx, assignment.GetCycleState(), assignment.GetPod(), nodeInfo); s != nil {
+				logger.Info("WAP: Reprieve failed because", "reasons", s.Reasons())
+				fits = false
+				break
+			} else {
+				// Do we need to also run Reserve/Unreserve Here?
+				// Some plugins change their cache
+				// For example:
+				// VolumeBinding: pl.Binder.AssumePodVolumes
+				// DRA: pl.draManager.ResourceClaims().SignalClaimPendingAllocation(claim.UID, claim)
+				// But they cannot change (victim removal/addition does not change this cache)
+				//
+				// And what about victims. Should we ? No, their state is not affected when we remove them
+				// via NodeInfo and we do not have mechanism to do so. Maybe we will need it, looking
+				// at DRA KEP.
+				if !podInfoCache[i].e {
+					podInfo, err := framework.NewPodInfo(assignment.GetPod())
+					if err != nil {
+						return false, err
+					}
+					podInfoCache[i] = struct {
+						pi fwk.PodInfo
+						e  bool
+					}{podInfo, true}
+				}
+				nodeInfo.AddPodInfo(podInfoCache[i].pi)
+				cleanUpFn = append(cleanUpFn, func() {
+					nodeInfo.RemovePod(logger, assignment.GetPod())
+				})
+			}
 		}
 
 		if !fits {
-			if err := removePods(v); err != nil {
-				return false, nil, err
+			if err := removePodsWithPreFilter(v, preemptorAssignments); err != nil {
+				return false, err
 			}
 			var names []string
 			for _, p := range v.Pods() {
@@ -215,7 +266,11 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 			logger.V(6).Info("Pods are potential preemption victims on domain", "pods", pods, "domain", domain.GetName())
 		}
 
-		return fits, assignments, nil
+		for _, fn := range cleanUpFn {
+			fn()
+		}
+
+		return fits, nil
 	}
 
 	// Try to reprieve as many pods as possible. We first try to reprieve the PDB
@@ -223,22 +278,18 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	// from the highest importance victims.
 	var victimsToPreempt []*victim
 	for _, v := range violatingVictims {
-		if fits, assignments, err := reprieveVictim(v); err != nil {
+		if fits, err := reprieveVictim(v, podGroupAssignments); err != nil {
 			return nil, fwk.AsStatus(err)
-		} else if fits {
-			podGroupAssignments = assignments
-		} else {
+		} else if !fits {
 			victimsToPreempt = append(victimsToPreempt, v)
 			numViolatingVictim++
 		}
 	}
 
 	for _, v := range nonViolatingVictims {
-		if fits, assignments, err := reprieveVictim(v); err != nil {
+		if fits, err := reprieveVictim(v, podGroupAssignments); err != nil {
 			return nil, fwk.AsStatus(err)
-		} else if fits {
-			podGroupAssignments = assignments
-		} else {
+		} else if !fits {
 			victimsToPreempt = append(victimsToPreempt, v)
 		}
 	}

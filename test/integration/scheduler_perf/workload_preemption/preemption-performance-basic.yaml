@@ -33,6 +33,9 @@
     countParam: $initPodGroups
   - opcode: startCollectingMetrics
     namespaces: [gang-preempt-0]
+  - opcode: startCollectingProfile
+    type: cpu
+    filePath: "cpu-out-huge.out"
   - opcode: createPods
     countParam: $initPodGroups
     countMultiplierParam: $podsPerGroup
@@ -41,6 +44,8 @@
     templateParams:
       podsPerGroup: $podsPerGroup
       cpuRequest: $gangCpuRequest
+  - opcode: stopCollectingProfile
+    type: cpu
   - opcode: stopCollectingMetrics
 
   workloads:
@@ -70,4 +75,30 @@
       initPodGroups: 10
       podsPerGroup: 10
       gangCpuRequest: 3970m
+  - name: 1000Nodes_5000InitPods_1Gang_1000Pods
+    labels: [performance]
+    params:
+      initNodes: 1000
+      initPods: 5000
+      initPodGroups: 1
+      podsPerGroup: 1000
+      gangCpuRequest: 3970m
+  - name: 1000Nodes_5000InitPods_10Gangs_100Pods
+    labels: [performance]
+    params:
+      initNodes: 1000
+      initPods: 5000
+      initPodGroups: 10
+      podsPerGroup: 100
+      gangCpuRequest: 3970m
+  - name: 1000Nodes_5000InitPods_100Gangs_10Pods
+    labels: [performance]
+    params:
+      initNodes: 1000
+      initPods: 5000
+      initPodGroups: 100
+      podsPerGroup: 10
+      gangCpuRequest: 3970m
+
+
 
