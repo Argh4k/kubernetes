@@ -2860,7 +2860,7 @@ func TestDefaultPreemption_PodGroupPostFilter_InvalidSnapshot(t *testing.T) {
 
 			preemptorPods := []*v1.Pod{st.MakePod().Name("p").UID("p").Priority(highPriority).Obj()}
 			mockSchedulingFunc := func(ctx context.Context) (*fwk.PodGroupAssignments, *fwk.Status) {
-				return nil, nil
+				return nil, fwk.NewStatus(fwk.Unschedulable)
 			}
 
 			pgInfo := &framework.PodGroupInfo{
@@ -2884,6 +2884,14 @@ type mockMutableSnapshotLister struct {
 	fwk.MutableSnapshotSharedLister
 	startMutationError error
 	endMutationError   error
+}
+
+func (m *mockMutableSnapshotLister) AddPod(podInfo fwk.PodInfo, nodeName string) error {
+	return nil
+}
+
+func (m *mockMutableSnapshotLister) RemovePod(logger klog.Logger, pod *v1.Pod, nodeName string) error {
+	return nil
 }
 
 func (m *mockMutableSnapshotLister) NodeInfos() fwk.NodeInfoLister {

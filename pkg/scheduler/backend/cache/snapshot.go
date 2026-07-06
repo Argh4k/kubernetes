@@ -540,3 +540,95 @@ func (s *Snapshot) ListNodesInPlacement() ([]fwk.NodeInfo, error) {
 	}
 	return s.placementNodes.nodeInfoList, nil
 }
+
+// AddPod adds a pod to the snapshot.
+// AddPod should be called only if the mutation was started via StartMutations.
+// Compared to the AssumePod() function, the AddPod does not have to be reverted
+// via RemovePod(). The state will be reverted when EndMutation is called.
+// This function is not thread safe, so it should be executed when no other routines can write/read from the snapshot.
+func (s *Snapshot) AddPod(podInfo fwk.PodInfo, nodeName string) error {
+	if s.snapshotBackup == nil {
+		return fmt.Errorf("ddPod() called outside of mutation session")
+	}
+	nodeInfo, ok := s.nodeInfoMap[nodeName]
+	if !ok {
+		nodeInfo = framework.NewNodeInfo()
+		s.nodeInfoMap[nodeName] = nodeInfo
+	}
+
+	hadPodsWithAffinity := len(nodeInfo.PodsWithAffinity) > 0
+	hadPodsWithRequiredAntiAffinity := len(nodeInfo.PodsWithRequiredAntiAffinity) > 0
+
+	pod := podInfo.GetPod()
+	nodeInfo.AddPodInfo(podInfo)
+
+	// nodeInfo.AddPodInfo maintains the NodeInfo's affinity and PVC indexes;
+	// the snapshot-wide indexes must be updated to match, otherwise inter-pod
+	// (anti-)affinity and VolumeRestrictions plugins observe stale state.
+	if !hadPodsWithAffinity && len(nodeInfo.PodsWithAffinity) > 0 {
+		s.havePodsWithAffinityNodeInfoList = append(s.havePodsWithAffinityNodeInfoList, nodeInfo)
+	}
+	if !hadPodsWithRequiredAntiAffinity && len(nodeInfo.PodsWithRequiredAntiAffinity) > 0 {
+		s.havePodsWithRequiredAntiAffinityNodeInfoList = append(s.havePodsWithRequiredAntiAffinityNodeInfoList, nodeInfo)
+	}
+
+	for pvcKey := range framework.PodPVCKeys(pod) {
+		s.usedPVCRefCounts[pvcKey]++
+	}
+
+	return nil
+}
+
+// RemovePod removes a pod from the snapshot.
+// RemovePod should be called only if the mutation was started via StartMutation.
+// The state will be reverted when EndMutation is called.
+// This function is not thread safe, so it should be executed when no other routines can write/read from the snapshot.
+func (s *Snapshot) RemovePod(logger klog.Logger, pod *v1.Pod, nodeName string) error {
+	if s.snapshotBackup == nil {
+		return fmt.Errorf("removePod() called outside of mutation session")
+	}
+	nodeInfo, ok := s.nodeInfoMap[nodeName]
+	if !ok {
+		return fmt.Errorf("node %q not found in the snapshot", nodeName)
+	}
+
+	hadPodsWithAffinity := len(nodeInfo.PodsWithAffinity) > 0
+	hadPodsWithRequiredAntiAffinity := len(nodeInfo.PodsWithRequiredAntiAffinity) > 0
+
+	if err := nodeInfo.RemovePod(logger, pod); err != nil {
+		return err
+	}
+
+	havePodsWithAffinity := len(nodeInfo.PodsWithAffinity) > 0
+	havePodsWithRequiredAntiAffinity := len(nodeInfo.PodsWithRequiredAntiAffinity) > 0
+
+	if hadPodsWithAffinity && !havePodsWithAffinity {
+		s.havePodsWithAffinityNodeInfoList = removeNodeInfoFromList(logger, s.havePodsWithAffinityNodeInfoList, nodeInfo)
+	}
+	if hadPodsWithRequiredAntiAffinity && !havePodsWithRequiredAntiAffinity {
+		s.havePodsWithRequiredAntiAffinityNodeInfoList = removeNodeInfoFromList(logger, s.havePodsWithRequiredAntiAffinityNodeInfoList, nodeInfo)
+	}
+	for pvcKey := range framework.PodPVCKeys(pod) {
+		s.usedPVCRefCounts[pvcKey]--
+		if s.usedPVCRefCounts[pvcKey] <= 0 {
+			delete(s.usedPVCRefCounts, pvcKey)
+		}
+	}
+	if len(nodeInfo.Pods) == 0 && nodeInfo.Node() == nil {
+		delete(s.nodeInfoMap, nodeName)
+	}
+	return nil
+}
+
+// removeNodeInfoFromList quickly removes a NodeInfo from a list without respecting the order of the list.
+func removeNodeInfoFromList(logger klog.Logger, list []fwk.NodeInfo, nodeInfoToRemove fwk.NodeInfo) []fwk.NodeInfo {
+	for i, nodeInfo := range list {
+		if nodeInfo == nodeInfoToRemove {
+			list[i] = list[len(list)-1]
+			list[len(list)-1] = nil
+			return list[:len(list)-1]
+		}
+	}
+	logger.Error(nil, "NodeInfo not found in the list", "nodeInfo", nodeInfoToRemove)
+	return list
+}

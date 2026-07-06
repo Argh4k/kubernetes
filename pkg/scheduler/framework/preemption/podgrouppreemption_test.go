@@ -1318,22 +1318,6 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger, ctx := ktesting.NewTestContext(t)
-			// Build nodes with pods
-			nodeInfos := make(map[string]fwk.NodeInfo)
-			podInfos := make(map[string]fwk.PodInfo)
-			for _, node := range tt.nodes {
-				nodeInfos[node.Name] = framework.NewNodeInfo()
-				nodeInfos[node.Name].SetNode(node)
-			}
-			for _, p := range tt.initPods {
-				podInfo, _ := framework.NewPodInfo(p)
-				podInfos[p.Name] = podInfo
-				nodeInfos[p.Spec.NodeName].AddPodInfo(podInfo)
-			}
-			for _, p := range tt.preemptor.pods {
-				podInfo, _ := framework.NewPodInfo(p)
-				podInfos[p.Name] = podInfo
-			}
 
 			mockFilterFactory := func(ctx context.Context, _ runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
 				return &mockFilterPlugin{
@@ -1357,13 +1341,15 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 			parallelism := parallelize.DefaultParallelism
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
+			snapshot := internalcache.NewSnapshot(tt.initPods, tt.nodes)
 			f, err := tf.NewFramework(
 				ctx,
 				registeredPlugins, "",
 				frameworkruntime.WithPodNominator(internalqueue.NewSchedulingQueue(nil, informerFactory)),
 				frameworkruntime.WithInformerFactory(informerFactory),
 				frameworkruntime.WithParallelism(parallelism),
-				frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot(tt.initPods, tt.nodes)),
+				frameworkruntime.WithSnapshotSharedLister(snapshot),
+				frameworkruntime.WithMutableSnapshotLister(snapshot),
 				frameworkruntime.WithLogger(logger),
 			)
 			if err != nil {
@@ -1372,39 +1358,6 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 
 			informerFactory.Start(ctx.Done())
 			informerFactory.WaitForCacheSync(ctx.Done())
-
-			var domainNodes []fwk.NodeInfo
-			for _, node := range tt.nodes {
-				domainNodes = append(domainNodes, nodeInfos[node.Name])
-			}
-
-			podGroups := make(map[string]*schedulingapi.PodGroup)
-			for _, pg := range tt.initPodGroups {
-				podGroups[pg.Name] = pg
-			}
-			pgLister := &mockPodGroupLister{podGroups: podGroups}
-			domain := newDomainForWorkloadPreemption(domainNodes, pgLister, "test-domain")
-
-			// Create a mock podGroupSchedulingFunc.
-			// This simulates whether the preempting PodGroup can schedule given the current
-			// hypothetical state of the cluster (where some candidate victims might be removed).
-			// var mockSchedulingFunc framework.PodGroupSchedulingFunc = func(ctx context.Context) (*fwk.WapAssignments, *fwk.Status) {
-			// 	assignments := make([]fwk.WapAssignment, 0)
-			// 	for p, n := range tt.mockAssignments {
-			// 		podInfo := podInfos[p]
-			// 		assignments = append(assignments, fwk.WapAssignment{
-			// 			Pod:        podInfo,
-			// 			Node:       n,
-			// 			CycleState: framework.NewCycleState(),
-			// 		})
-			// 	}
-			// 	mockAssignments := &fwk.WapAssignments{Assignments: assignments}
-			// 	mockStatus := fwk.NewStatus(fwk.Success)
-			// 	if tt.mockStatus != nil {
-			// 		mockStatus = tt.mockStatus
-			// 	}
-			// 	return mockAssignments, mockStatus
-			// }
 
 			var mockSchedulingFunc framework.PodGroupSchedulingFunc = func(ctx context.Context) (*fwk.PodGroupAssignments, *fwk.Status) {
 				minCount := 1
@@ -1416,7 +1369,8 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 
 				nodeMap := make(map[string]fwk.NodeInfo)
 				assignedSizes := make(map[string]int)
-				for _, n := range domainNodes {
+				currentNodes, _ := f.SnapshotSharedLister().NodeInfos().List()
+				for _, n := range currentNodes {
 					nodeMap[n.Node().Name] = n
 					nodeSize := 0
 					for _, existingPod := range n.GetPods() {
@@ -1453,15 +1407,24 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain(t *testing.T) {
 				return nil, fwk.NewStatus(fwk.Unschedulable)
 			}
 
+			podGroups := make(map[string]*schedulingapi.PodGroup)
+			for _, pg := range tt.initPodGroups {
+				podGroups[pg.Name] = pg
+			}
+			pgLister := &mockPodGroupLister{podGroups: podGroups}
 			pl := &PodGroupEvaluator{
 				Handle:           f,
 				podGroupSnapshot: pgLister,
 			}
 
+			pl.Handle.MutableSnapshotSharedLister().StartMutations()
+			domainNodes, _ := snapshot.NodeInfos().List()
+			domain := newDomainForWorkloadPreemption(domainNodes, pgLister, "test-domain")
 			res, gotStatus := pl.selectVictimsOnDomain(ctx, tt.preemptor, domain, tt.pdbs, mockSchedulingFunc)
 			if !gotStatus.IsSuccess() {
 				t.Logf("SelectVictimsOnDomain failed: %v", gotStatus.Message())
 			}
+			pl.Handle.MutableSnapshotSharedLister().EndMutations()
 
 			wantCode := tt.expectedStatus.Code()
 			gotCode := gotStatus.Code()
@@ -1651,12 +1614,14 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain_NominatedNodes(t *testing.T) {
 		tf.RegisterQueueSortPlugin(queuesort.Name, queuesort.New),
 		tf.RegisterBindPlugin(defaultbinder.Name, defaultbinder.New),
 	}
+	snapshot := internalcache.NewSnapshot([]*v1.Pod{p3}, []*v1.Node{node1})
 	f, err := tf.NewFramework(
 		ctx,
 		registeredPlugins, "",
 		frameworkruntime.WithPodNominator(internalqueue.NewSchedulingQueue(nil, informerFactory)),
 		frameworkruntime.WithInformerFactory(informerFactory),
-		frameworkruntime.WithSnapshotSharedLister(internalcache.NewSnapshot([]*v1.Pod{p3}, []*v1.Node{node1})),
+		frameworkruntime.WithSnapshotSharedLister(snapshot),
+		frameworkruntime.WithMutableSnapshotLister(snapshot),
 		frameworkruntime.WithLogger(logger),
 	)
 	if err != nil {
@@ -1684,7 +1649,9 @@ func TestPodGroupEvaluator_SelectVictimsOnDomain_NominatedNodes(t *testing.T) {
 
 	pl := &PodGroupEvaluator{Handle: f}
 
+	pl.Handle.MutableSnapshotSharedLister().StartMutations()
 	result, gotStatus := pl.selectVictimsOnDomain(ctx, preemptor, domain, nil, mockSchedulingFunc)
+	pl.Handle.MutableSnapshotSharedLister().EndMutations()
 	if !gotStatus.IsSuccess() {
 		t.Fatalf("SelectVictimsOnDomain failed: %v", gotStatus.Message())
 	}

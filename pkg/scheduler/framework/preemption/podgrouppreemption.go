@@ -115,6 +115,9 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	for _, nodeInfo := range domain.Nodes() {
 		nameToNode[nodeInfo.Node().Name] = nodeInfo
 	}
+	preemptorNodes := make(map[string]bool)
+
+	mutableLister := ev.Handle.MutableSnapshotSharedLister()
 
 	// Ensure the preemptor is eligible to preempt other pods.
 	if ok, msg := ev.preemptorEligibleToPreemptOthers(ctx, preemptor, nameToNode); !ok {
@@ -124,18 +127,23 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 
 	removePods := func(v *victim) error {
 		for _, pi := range v.Pods() {
-			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
-			if err := nodeInfo.RemovePod(logger, pi.GetPod()); err != nil {
+			if err := mutableLister.RemovePod(logger, pi.GetPod(), pi.GetPod().Spec.NodeName); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	addPodsWithPreFilter := func(v *victim, preemptorAssignments []fwk.ProposedAssignment) error {
+	// addVictimPodsWithPreFilter adds all victims to the snapshot
+	// and calls PreFilterExtensionAddPod(victim) for all preemptor pods.
+	addVictimPodsWithPreFilter := func(v *victim, preemptorAssignments []fwk.ProposedAssignment) error {
 		for _, pi := range v.Pods() {
 			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
-			nodeInfo.AddPodInfo(pi)
+			if preemptorNodes[pi.GetPod().Spec.NodeName] {
+				if err := mutableLister.AddPod(pi, pi.GetPod().Spec.NodeName); err != nil {
+					return err
+				}
+			}
 			for _, assignment := range preemptorAssignments {
 				status := ev.Handle.RunPreFilterExtensionAddPod(ctx, assignment.GetCycleState(), assignment.GetPod(), pi, nodeInfo)
 				if !status.IsSuccess() {
@@ -146,11 +154,15 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 		return nil
 	}
 
-	removePodsWithPreFilter := func(v *victim, preemptorAssignments []fwk.ProposedAssignment) error {
+	// removeVictimPodsWithPreFilter removes all victims from the snapshot
+	// and calls PreFilterExtensionRemovePod(victim) for all preemptor pods.
+	removeVictimPodsWithPreFilter := func(v *victim, preemptorAssignments []fwk.ProposedAssignment) error {
 		for _, pi := range v.Pods() {
 			nodeInfo := nameToNode[pi.GetPod().Spec.NodeName]
-			if err := nodeInfo.RemovePod(logger, pi.GetPod()); err != nil {
-				return err
+			if preemptorNodes[pi.GetPod().Spec.NodeName] {
+				if err := mutableLister.RemovePod(logger, pi.GetPod(), pi.GetPod().Spec.NodeName); err != nil {
+					return err
+				}
 			}
 			for _, assignment := range preemptorAssignments {
 				status := ev.Handle.RunPreFilterExtensionRemovePod(ctx, assignment.GetCycleState(), assignment.GetPod(), pi, nodeInfo)
@@ -216,6 +228,7 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 			}
 			proposedAssignments = append(proposedAssignments, assignment)
 			podInfoCache = append(podInfoCache, podInfo)
+			preemptorNodes[assignment.GetNodeName()] = true
 		}
 	}
 
@@ -228,28 +241,16 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 	// This logic uses the CycleState returned for each of the preemptor pods from the
 	// scheduling algorithm called on a cluster without victims.
 	// This means that the CycleState for the Nth preemptor pod was created with:
-	// - all previous preemptor pods Assumed and Reserved
+	// - all previous preemptor pods assumed and reserved
 	// - no knowledge of upcoming preemptor pods
-	//
-	// Assumptions:
-	// 1. Reserve methods influence further pods by changing how their CycleState is filled
-	// in PreFitler. It means that in scenario:
-	// Reserve(PodA) -> PreFilter(PodB) -> Filter(PodB) -> Unreserve(PodA) -> Filter(PodB)
-	// Both Filter(PodB) calls should return the same result.
-	// This is true for all in-tree plugins implementing Reserve plugin.
-	// 2. NodeInfo.RemovePod is enough to clear victims for the scheduling algorithm.
-	// This is partially true as there are fields in snapshot that are not updated by this path.
-	// However, not updating data of updateNodesHavePodsWithAffinity and updateNodesHavePodsWithRequiredAntiAffinity
-	// can only lead to false positives (more nodes in the list than real nodes with pods with affinity/antiaffinity)
-	// which is acceptable.
 	reprieveVictim := func(v *victim, preemptorAssignments []fwk.ProposedAssignment) (fits bool, err error) {
-		if err = addPodsWithPreFilter(v, preemptorAssignments); err != nil {
+		if err = addVictimPodsWithPreFilter(v, preemptorAssignments); err != nil {
 			return false, err
 		}
-		cleanUpFns := []func() error{}
+		cleanupFns := []func() error{}
 		defer func() {
-			for i := len(cleanUpFns) - 1; i >= 0; i-- {
-				if cleanupErr := cleanUpFns[i](); cleanupErr != nil {
+			for i := len(cleanupFns) - 1; i >= 0; i-- {
+				if cleanupErr := cleanupFns[i](); cleanupErr != nil {
 					err = errors.Join(err, cleanupErr)
 				}
 			}
@@ -257,18 +258,27 @@ func (ev *PodGroupEvaluator) selectVictimsOnDomain(
 		fits = true
 		for i, assignment := range preemptorAssignments {
 			nodeInfo := nameToNode[assignment.GetNodeName()]
-
 			s := ev.Handle.RunFilterPluginsWithNominatedPods(ctx, assignment.GetCycleState(), assignment.GetPod(), nodeInfo)
 			if !s.IsSuccess() {
-				if err = removePodsWithPreFilter(v, preemptorAssignments); err != nil {
+				if err = removeVictimPodsWithPreFilter(v, preemptorAssignments); err != nil {
 					return false, err
 				}
-				logger.V(6).Info("Pods are potential preemption victims on domain", "pods", toPodNames(v.Pods()), "domain", domain.GetName())
+				if l := logger.V(6); l.Enabled() {
+					l.Info("Pods are potential preemption victims on domain", "pods", toPodNames(v.Pods()), "domain", domain.GetName())
+				}
 				return false, nil
 			}
-			nodeInfo.AddPodInfo(podInfoCache[i])
-			cleanUpFns = append(cleanUpFns, func() error {
-				return nodeInfo.RemovePod(logger, assignment.GetPod())
+			// We do not need to add the preemptor pod to the cycle state of upcoming preemptor pods.
+			// This is because the cycle state was created with them already assumed.
+			if err = mutableLister.AddPod(podInfoCache[i], assignment.GetNodeName()); err != nil {
+				return false, err
+			}
+			ev.Handle.RunReservePluginsReserve(ctx, assignment.GetCycleState(), assignment.GetPod(), nodeInfo.Node().GetName())
+			cleanupFns = append(cleanupFns, func() error {
+				if ev.Handle.RunReservePluginsUnreserve(ctx, assignment.GetCycleState(), assignment.GetPod(), nodeInfo.Node().GetName()); err != nil {
+					return err
+				}
+				return mutableLister.RemovePod(logger, assignment.GetPod(), assignment.GetNodeName())
 			})
 		}
 		return fits, nil

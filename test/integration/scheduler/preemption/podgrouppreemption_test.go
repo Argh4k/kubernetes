@@ -38,6 +38,7 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler"
+	config "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	configtesting "k8s.io/kubernetes/pkg/scheduler/apis/config/testing"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
@@ -68,6 +69,8 @@ func TestPodGroupPreemption(t *testing.T) {
 		expectedToHaveNNNInfo              []string
 		expectedPodsPreemptedByWAP         int
 		enablePodGroupPreemptionPolicy     bool
+		customPluginName                   string
+		customPluginFunc                   frameworkruntime.PluginFactory
 	}{
 		{
 			name: "Full PodGroup Preemption",
@@ -988,6 +991,34 @@ func TestPodGroupPreemption(t *testing.T) {
 			expectedToHaveNNNInfo:      []string{"preemptor-1", "preemptor-2"},
 			expectedPodsPreemptedByWAP: 1,
 		},
+		{
+			// This scenario verifies that during reprieval we respect Reserve plugins.
+			// The number of reserved pods + pods with "resource-taken" is at max 2.
+			name: "Reserve plugins are called during preemption simulation, so second pod fails",
+			nodes: []*v1.Node{
+				st.MakeNode().Name("node1").Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "3", v1.ResourceMemory: "4Gi", v1.ResourcePods: "32"}).Obj(),
+			},
+			podGroups: []*schedulingapi.PodGroup{
+				st.MakePodGroup().Name("preemptor-pg").Priority(100).MinCount(2).Obj(),
+			},
+			initialPods: []*v1.Pod{
+				st.MakePod().Name("v1").Node("node1").Label("resource-taken", "true").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").ZeroTerminationGracePeriod().Priority(15).Obj(),
+				st.MakePod().Name("v2").Node("node1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").ZeroTerminationGracePeriod().Priority(10).Obj(),
+			},
+			preemptorPods: []*v1.Pod{
+				st.MakePod().Name("p-a").Label("test-plugin", "true").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").PodGroupName("preemptor-pg").ZeroTerminationGracePeriod().Priority(100).Obj(),
+				st.MakePod().Name("p-b").Label("test-plugin", "true").Req(map[v1.ResourceName]string{v1.ResourceCPU: "1"}).Container("image").PodGroupName("preemptor-pg").ZeroTerminationGracePeriod().Priority(100).Obj(),
+			},
+			expectedScheduled:          []string{"p-a", "p-b", "v2"},
+			expectedPreempted:          []string{"v1"},
+			expectedUnschedulable:      []string{},
+			expectedToHaveNNNInfo:      []string{},
+			expectedPodsPreemptedByWAP: 1,
+			customPluginName:           "mockReservePlugin",
+			customPluginFunc: func(_ context.Context, _ runtime.Object, _ fwk.Handle) (fwk.Plugin, error) {
+				return &mockReservePlugin{maxPods: 2}, nil
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1032,6 +1063,14 @@ func TestPodGroupPreemption(t *testing.T) {
 					},
 				}},
 			})
+
+			if tt.customPluginName != "" {
+				err := registry.Register(tt.customPluginName, tt.customPluginFunc)
+				if err != nil {
+					t.Fatalf("Error registering custom plugin: %v", err)
+				}
+				cfg.Profiles[0].Plugins.MultiPoint.Enabled = append(cfg.Profiles[0].Plugins.MultiPoint.Enabled, config.Plugin{Name: tt.customPluginName})
+			}
 
 			// Set PodMaxBackoff to 1 second to turn on backoff and allow apiCacher to get information about
 			// pod NNN. Without this we might have a race between starting binding and update of apiCacher.
@@ -1228,3 +1267,54 @@ func (bp *mockBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p *v1.
 }
 
 var _ fwk.BindPlugin = &mockBindPlugin{}
+
+type mockReservePlugin struct {
+	lock          sync.Mutex
+	reservedCount int
+	maxPods       int
+}
+
+func (p *mockReservePlugin) Name() string {
+	return "mockReservePlugin"
+}
+
+func (p *mockReservePlugin) Reserve(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) *fwk.Status {
+	if pod.Labels["test-plugin"] != "true" {
+		return nil
+	}
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	p.reservedCount++
+	return nil
+}
+
+func (p *mockReservePlugin) Unreserve(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) {
+	if pod.Labels["test-plugin"] != "true" {
+		return
+	}
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	p.reservedCount--
+}
+
+func (p *mockReservePlugin) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
+	if pod.Labels["test-plugin"] != "true" {
+		return nil
+	}
+	takenCount := 0
+	for _, p := range nodeInfo.GetPods() {
+		if p.GetPod().Labels["resource-taken"] == "true" {
+			takenCount++
+		}
+	}
+
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	if p.reservedCount+takenCount >= p.maxPods {
+		return fwk.NewStatus(fwk.Unschedulable, "already reserved")
+	}
+	return nil
+}
+
+var _ fwk.ReservePlugin = &mockReservePlugin{}
+var _ fwk.FilterPlugin = &mockReservePlugin{}
