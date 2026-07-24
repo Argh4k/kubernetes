@@ -220,29 +220,7 @@ func (pl *GangScheduling) preEnqueueWithHierarchies(pod *v1.Pod) *fwk.Status {
 		return nil
 	}
 
-	snapshot, err := pl.handle.PodGroupManager().BuildHierarchySnapshotFromPod(pod)
-	if err != nil {
-		// Could not build snapshot (e.g. root PG not found). Treat as unschedulable.
-		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, fmt.Sprintf("failed to build hierarchy snapshot: %v", err))
-	}
-
-	namespace := pod.Namespace
-	schedulingGroup := pod.Spec.SchedulingGroup
-
-	podGroup, err := snapshot.PodGroups().Get(namespace, *schedulingGroup.PodGroupName)
-	if err != nil {
-		// The pod is unschedulable until its PodGroup object is created.
-		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, fmt.Sprintf("waiting for pods's pod group %q to appear in scheduling queue", *schedulingGroup.PodGroupName))
-	}
-
-	if podGroup.Spec.ParentCompositePodGroupName == nil || !pl.isCompositePodGroupEnabled {
-		if pl.isPGReady(snapshot, namespace, podGroup.Name, func(s fwk.PodGroupState) int { return s.AllPodsCount() }) {
-			return nil
-		}
-		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for minCount pods from a gang to appear in scheduling queue")
-	}
-
-	return pl.checkCPGHierarchyReadiness(snapshot, namespace, *podGroup.Spec.ParentCompositePodGroupName, func(s fwk.PodGroupState) int { return s.AllPodsCount() })
+	return pl.checkCPGHierarchyReadiness(pl.handle.PodGroupManager(), pod, func(s fwk.PodGroupState) int { return s.AllPodsCount() })
 }
 
 // preEnqueueHierarchiesDisabled checks if the pod belongs to a gang and, if so, whether the gang has met its MinCount of available pods.
@@ -281,21 +259,48 @@ func (pl *GangScheduling) preEnqueueHierarchiesDisabled(pod *v1.Pod) *fwk.Status
 	return nil
 }
 
-// checkCPGHierarchyReadiness checks if the Composite Pod Group hierarchy is ready for scheduling.
-// It first retrieves the root composite pod group and then recursively traverses the entire Composite Pod Group hierarchy
-// to determine if the hierarchy is ready for scheduling.
-func (pl *GangScheduling) checkCPGHierarchyReadiness(snapshot fwk.PodGroupManager, namespace, startCPGName string, readinessCountFn func(fwk.PodGroupState) int) *fwk.Status {
-	cpgKey := fwk.CompositePodGroupKey(namespace, startCPGName)
-	rootKey, ok, err := snapshot.GetRootKeyForGroup(cpgKey)
-	if err != nil {
-		return fwk.AsStatus(err)
-	}
-	if !ok {
-		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, fmt.Sprintf("failed to build hierarchy snapshot: composite pod group object not found in state for %s", cpgKey.String()))
+func isCPGTreeReady(cpg *schedulingv1alpha3.CompositePodGroup, _ fwk.CompositePodGroupState, childrenResults []bool) bool {
+	minGroupCount := 1
+	policy := cpg.Spec.SchedulingPolicy
+	if policy.Gang != nil {
+		minGroupCount = int(policy.Gang.MinGroupCount)
 	}
 
-	if !pl.isCPGTreeReady(snapshot, rootKey.Namespace, rootKey.Name, readinessCountFn) {
-		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, fmt.Sprintf("waiting for composite pod group %q tree to meet quorum", rootKey.Name))
+	successfulChildren := 0
+	for _, childReady := range childrenResults {
+		if childReady {
+			successfulChildren++
+		}
+	}
+
+	return successfulChildren >= minGroupCount
+}
+
+// checkCPGHierarchyReadiness checks if the Composite Pod Group hierarchy is ready for scheduling.
+// It uses TraverseHierarchyFromPod to traverse the hierarchy from the root and determine if it is ready.
+func (pl *GangScheduling) checkCPGHierarchyReadiness(podManager fwk.PodGroupManager, pod *v1.Pod, readinessCountFn func(fwk.PodGroupState) int) *fwk.Status {
+	ready, err := podManager.TraverseHierarchyFromPod(
+		pod,
+		isCPGTreeReady,
+		func(pg *schedulingapi.PodGroup, pgState fwk.PodGroupState) bool {
+			minCount := 1
+			if pg.Spec.SchedulingPolicy.Gang != nil {
+				minCount = int(pg.Spec.SchedulingPolicy.Gang.MinCount)
+			}
+			return readinessCountFn(pgState) >= minCount
+		},
+	)
+	if err != nil {
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, fmt.Sprintf("failed to build hierarchy snapshot: %v", err))
+	}
+
+	if !ready {
+		pgKey := fwk.PodGroupKey(pod.Namespace, *pod.Spec.SchedulingGroup.PodGroupName)
+		rootKey, ok, _ := podManager.GetRootKeyForGroup(pgKey)
+		if ok && rootKey.Type == fwk.CompositePodGroupKeyType {
+			return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, fmt.Sprintf("waiting for composite pod group %q tree to meet quorum", rootKey.Name))
+		}
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, "waiting for minCount pods from a gang to appear in scheduling queue")
 	}
 	return nil
 }

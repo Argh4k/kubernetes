@@ -3740,3 +3740,107 @@ func TestCache_GetRootKeyForGroup(t *testing.T) {
 		})
 	}
 }
+
+func TestCache_TraverseHierarchyFromPod(t *testing.T) {
+	podNoGroup := st.MakePod().Name("p0").Namespace("ns1").UID("p0").Obj()
+	pod1 := st.MakePod().Name("p1").Namespace("ns1").UID("p1").PodGroupName("pg1").Obj()
+	pg1 := st.MakePodGroup().Name("pg1").Namespace("ns1").UID("pg1").Obj()
+
+	pod2 := st.MakePod().Name("p2").Namespace("ns1").UID("p2").PodGroupName("pg2").Obj()
+	pg2 := st.MakePodGroup().Name("pg2").Namespace("ns1").UID("pg2").ParentCompositePodGroup("cpg1").Obj()
+	cpg1 := st.MakeCompositePodGroup().Name("cpg1").Namespace("ns1").Obj()
+
+	podCycle := st.MakePod().Name("pCycle").Namespace("ns1").UID("pCycle").PodGroupName("pgCycle").Obj()
+	pgCycle := st.MakePodGroup().Name("pgCycle").Namespace("ns1").UID("pgCycle").ParentCompositePodGroup("cycle1").Obj()
+	cpgCycle1 := st.MakeCompositePodGroup().Name("cycle1").Namespace("ns1").ParentCompositePodGroup("cycle2").Obj()
+	cpgCycle2 := st.MakeCompositePodGroup().Name("cycle2").Namespace("ns1").ParentCompositePodGroup("cycle1").Obj()
+
+	tests := []struct {
+		name                     string
+		pod                      *v1.Pod
+		initialPGs               []*schedulingv1beta1.PodGroup
+		initialCPGs              []*schedulingv1alpha3.CompositePodGroup
+		isCPGReady               func(*schedulingv1alpha3.CompositePodGroup, fwk.CompositePodGroupState, []bool) bool
+		isPGReady                func(*schedulingv1beta1.PodGroup, fwk.PodGroupState) bool
+		genericWorkloadEnabled   bool
+		compositePodGroupEnabled bool
+		wantErr                  bool
+		wantReady                bool
+	}{
+		{
+			name:                   "pod without scheduling group",
+			pod:                    podNoGroup,
+			wantErr:                true,
+			genericWorkloadEnabled: true,
+		},
+		{
+			name:                   "pod with scheduling group but no pod group in cache",
+			pod:                    pod1,
+			wantErr:                true,
+			genericWorkloadEnabled: true,
+		},
+		{
+			name:                   "simple pod group - ready",
+			pod:                    pod1,
+			initialPGs:             []*schedulingv1beta1.PodGroup{pg1},
+			isPGReady:              func(_ *schedulingv1beta1.PodGroup, _ fwk.PodGroupState) bool { return true },
+			genericWorkloadEnabled: true,
+			wantReady:              true,
+		},
+		{
+			name:                   "simple pod group - not ready",
+			pod:                    pod1,
+			initialPGs:             []*schedulingv1beta1.PodGroup{pg1},
+			isPGReady:              func(_ *schedulingv1beta1.PodGroup, _ fwk.PodGroupState) bool { return false },
+			genericWorkloadEnabled: true,
+			wantReady:              false,
+		},
+		{
+			name:                     "pod group with parent CPG hierarchy - ready",
+			pod:                      pod2,
+			initialPGs:               []*schedulingv1beta1.PodGroup{pg2},
+			initialCPGs:              []*schedulingv1alpha3.CompositePodGroup{cpg1},
+			isPGReady:                func(_ *schedulingv1beta1.PodGroup, _ fwk.PodGroupState) bool { return true },
+			isCPGReady:               func(_ *schedulingv1alpha3.CompositePodGroup, _ fwk.CompositePodGroupState, children []bool) bool { return len(children) > 0 && children[0] },
+			genericWorkloadEnabled:   true,
+			compositePodGroupEnabled: true,
+			wantReady:                true,
+		},
+		{
+			name:                     "cycle detection",
+			pod:                      podCycle,
+			initialPGs:               []*schedulingv1beta1.PodGroup{pgCycle},
+			initialCPGs:              []*schedulingv1alpha3.CompositePodGroup{cpgCycle1, cpgCycle2},
+			genericWorkloadEnabled:   true,
+			compositePodGroupEnabled: true,
+			wantErr:                  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ctx := ktesting.NewTestContext(t)
+			cache := newCache(ctx, time.Second, nil, tt.genericWorkloadEnabled, tt.compositePodGroupEnabled)
+			logger := klog.Background()
+
+			for _, pg := range tt.initialPGs {
+				cache.AddPodGroup(pg)
+			}
+			for _, cpg := range tt.initialCPGs {
+				cache.AddCompositePodGroup(logger, cpg)
+			}
+
+			ready, err := cache.TraverseHierarchyFromPod(tt.pod, tt.isCPGReady, tt.isPGReady)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("TraverseHierarchyFromPod() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+			if ready != tt.wantReady {
+				t.Errorf("TraverseHierarchyFromPod() ready = %v, want %v", ready, tt.wantReady)
+			}
+		})
+	}
+}

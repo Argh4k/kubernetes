@@ -1323,6 +1323,110 @@ func (cache *cacheImpl) BuildHierarchySnapshotFromPod(pod *v1.Pod) (fwk.PodGroup
 	return snapshot, nil
 }
 
+// TraverseHierarchyFromPod traverses the pod group hierarchy starting from the root of the given pod,
+// calling isPGReady for each PodGroup and isCPGReady for each CompositePodGroup.
+func (cache *cacheImpl) TraverseHierarchyFromPod(
+	pod *v1.Pod,
+	isCPGReady func(cpg *schedulingv1alpha3.CompositePodGroup, cpgState fwk.CompositePodGroupState, childrenResults []bool) bool,
+	isPGReady func(pg *schedulingv1beta1.PodGroup, pgState fwk.PodGroupState) bool,
+) (bool, error) {
+	if pod.Spec.SchedulingGroup == nil {
+		return false, fmt.Errorf("pod has no scheduling group")
+	}
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+
+	// 1. Find root CPG/PG by traversing upwards
+	currentKey := fwk.PodGroupKey(pod.Namespace, *pod.Spec.SchedulingGroup.PodGroupName)
+	pgs, exists := cache.podGroupStates[currentKey]
+	if !exists {
+		return false, fmt.Errorf("pod group state not found for %s", currentKey.String())
+	}
+
+	pg := pgs.podGroup
+	if pg == nil {
+		return false, fmt.Errorf("pod group object not found in state for %s", currentKey.String())
+	}
+
+	if cache.compositePodGroupEnabled && pg.Spec.ParentCompositePodGroupName != nil {
+		currentKey = fwk.CompositePodGroupKey(pod.Namespace, *pg.Spec.ParentCompositePodGroupName)
+		for range schedulingv1alpha3.WorkloadMaxTreeDepth - 1 {
+			cpgs, exists := cache.compositePodGroupStates[currentKey]
+			if !exists {
+				return false, fmt.Errorf("parent composite pod group state not found for %s", currentKey.String())
+			}
+			cpg := cpgs.compositePodGroup
+			if cpg == nil {
+				return false, fmt.Errorf("composite pod group object not found in state for %s", currentKey.String())
+			}
+			if cpg.Spec.ParentCompositePodGroupName == nil {
+				break
+			}
+			currentKey = fwk.CompositePodGroupKey(pod.Namespace, *cpg.Spec.ParentCompositePodGroupName)
+		}
+	}
+
+	// 2. We have the root key. Now traverse downwards calling passed functions.
+	visited := sets.New[fwk.EntityKey]()
+	return cache.traversePodGroupTree(currentKey, isCPGReady, isPGReady, visited)
+}
+
+// traversePodGroupTree recursively traverses the pod group state tree starting from the given key.
+// It assumes that the cache lock is held by the caller.
+func (cache *cacheImpl) traversePodGroupTree(
+	key fwk.EntityKey,
+	isCPGReady func(cpg *schedulingv1alpha3.CompositePodGroup, cpgState fwk.CompositePodGroupState, childrenResults []bool) bool,
+	isPGReady func(pg *schedulingv1beta1.PodGroup, pgState fwk.PodGroupState) bool,
+	visited sets.Set[fwk.EntityKey],
+) (bool, error) {
+	if visited.Has(key) {
+		return false, fmt.Errorf("cycle detected in composite pod group hierarchy: %s", key.String())
+	}
+	visited.Insert(key)
+
+	switch key.Type {
+	case fwk.PodGroupKeyType:
+		pgs, exists := cache.podGroupStates[key]
+		if !exists {
+			return false, fmt.Errorf("pod group state not found for %s", key.String())
+		}
+		if pgs.podGroup == nil {
+			return false, fmt.Errorf("pod group object not found in state for %s", key.String())
+		}
+		if isPGReady == nil {
+			return true, nil
+		}
+		return isPGReady(pgs.podGroup, pgs), nil
+
+	case fwk.CompositePodGroupKeyType:
+		cpgs, exists := cache.compositePodGroupStates[key]
+		if !exists {
+			return false, fmt.Errorf("composite pod group state not found for %s", key.String())
+		}
+		if cpgs.compositePodGroup == nil {
+			return false, fmt.Errorf("composite pod group object not found in state for %s", key.String())
+		}
+
+		children := cpgs.children.Clone()
+		childrenResults := make([]bool, 0, len(children))
+		for childKey := range children {
+			res, err := cache.traversePodGroupTree(childKey, isCPGReady, isPGReady, visited)
+			if err != nil {
+				return false, err
+			}
+			childrenResults = append(childrenResults, res)
+		}
+
+		if isCPGReady == nil {
+			return true, nil
+		}
+		return isCPGReady(cpgs.compositePodGroup, cpgs, childrenResults), nil
+	}
+
+	return false, fmt.Errorf("unsupported key type: %s", key.Type)
+}
+
 // buildPodGroupStateSnapshotTree recursively builds a snapshot of the pod group state tree starting from the given key.
 // It assumes that the cache lock is held by the caller.
 func (cache *cacheImpl) buildPodGroupStateSnapshotTree(key fwk.EntityKey, snapshot *Snapshot, visited sets.Set[fwk.EntityKey]) error {

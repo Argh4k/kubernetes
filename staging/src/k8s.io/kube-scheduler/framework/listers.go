@@ -218,6 +218,13 @@ type PodGroupManager interface {
 	CompositePodGroups() CompositePodGroupLister
 	// BuildHierarchySnapshotFromPod builds a hierarchy snapshot from the given pod.
 	BuildHierarchySnapshotFromPod(pod *v1.Pod) (PodGroupManager, error)
+	// TraverseHierarchyFromPod traverses the pod group hierarchy starting from the root of the given pod,
+	// calling isPGReady for each PodGroup and isCPGReady for each CompositePodGroup.
+	TraverseHierarchyFromPod(
+		pod *v1.Pod,
+		isCPGReady func(cpg *schedulingv1alpha3.CompositePodGroup, cpgState CompositePodGroupState, childrenResults []bool) bool,
+		isPGReady func(pg *schedulingapi.PodGroup, pgState PodGroupState) bool,
+	) (bool, error)
 	// GetRootKeyForGroup returns the root key of the given EntityKey.
 	GetRootKeyForGroup(key EntityKey) (EntityKey, bool, error)
 }

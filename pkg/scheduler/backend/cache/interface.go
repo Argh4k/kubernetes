@@ -160,6 +160,14 @@ type Cache interface {
 	// BuildHierarchySnapshotFromPod returns a snapshot of the pod group hierarchy for the given pod.
 	BuildHierarchySnapshotFromPod(pod *v1.Pod) (fwk.PodGroupManager, error)
 
+	// TraverseHierarchyFromPod traverses the pod group hierarchy starting from the root of the given pod,
+	// calling isPGReady for each PodGroup and isCPGReady for each CompositePodGroup.
+	TraverseHierarchyFromPod(
+		pod *v1.Pod,
+		isCPGReady func(cpg *schedulingv1alpha3.CompositePodGroup, cpgState fwk.CompositePodGroupState, childrenResults []bool) bool,
+		isPGReady func(pg *schedulingv1beta1.PodGroup, pgState fwk.PodGroupState) bool,
+	) (bool, error)
+
 	// GetRootKeyForGroup returns the root key of the given EntityKey.
 	GetRootKeyForGroup(key fwk.EntityKey) (fwk.EntityKey, bool, error)
 }

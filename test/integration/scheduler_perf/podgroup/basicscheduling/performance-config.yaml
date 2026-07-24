@@ -22,6 +22,9 @@
     templatePath: templates/podgroup.yaml
     templateParams:
       podsPerGroup: $podsPerGroup
+  - opcode: startCollectingProfile
+    type: CPU
+    filePath: cpu.out
   - opcode: createPods
     # Create pods with reference to the pod groups according to their indices (e.g., pods 0-2 → basic-group-0, pods 3-5 → basic-group-1, etc.).
     countParam: $initPodGroups
@@ -31,6 +34,8 @@
     collectMetrics: true
     templateParams:
       podsPerGroup: $podsPerGroup
+  - opcode: stopCollectingProfile
+    type: CPU
   workloads:
   - name: 10Nodes_3Groups
     labels: [integration-test, short]
