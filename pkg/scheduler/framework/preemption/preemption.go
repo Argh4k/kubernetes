@@ -278,6 +278,7 @@ func (ev *Evaluator) callExtenders(logger klog.Logger, pod *v1.Pod, candidates [
 		newCandidates = append(newCandidates, &candidate{
 			victims: victimsMap[nodeName],
 			name:    nodeName,
+			nodes:   []string{nodeName},
 		})
 	}
 	return newCandidates, nil
@@ -473,6 +474,7 @@ func (ev *Evaluator) DryRunPreemption(ctx context.Context, state fwk.CycleState,
 			c := &candidate{
 				victims: &victims,
 				name:    nodeInfo.Node().Name,
+				nodes:   []string{nodeInfo.Node().Name},
 			}
 			if numPDBViolations == 0 {
 				nonViolatingCandidates.add(c)
