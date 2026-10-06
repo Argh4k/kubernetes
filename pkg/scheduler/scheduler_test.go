@@ -42,6 +42,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
@@ -62,6 +63,7 @@ import (
 	apicalls "k8s.io/kubernetes/pkg/scheduler/framework/api_calls"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultpreemption"
 	plfeature "k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort"
@@ -1519,3 +1521,171 @@ informer_queued_items{group="",name="kube-scheduler",resource="pods",version="v1
 		t.Error(err)
 	}
 }
+
+func TestAsyncPreemptionPreEnqueueGating(t *testing.T) {
+	featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+		features.SchedulerAsyncPreemption: true,
+		features.SchedulerAsyncAPICalls:   false,
+	})
+
+	logger, ctx := ktesting.NewTestContext(t)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	node1 := st.MakeNode().Name("node1").UID("node1").Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Obj()
+	victim := st.MakePod().Name("victim").Namespace(v1.NamespaceDefault).UID("victim").
+		Node("node1").Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Priority(10).
+		TerminationGracePeriodSeconds(30).Obj()
+	preemptor := st.MakePod().Name("preemptor").Namespace(v1.NamespaceDefault).UID("preemptor").
+		SchedulerName(v1.DefaultSchedulerName).Req(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Priority(100).Obj()
+
+	fakeClient := fake.NewClientset(node1, victim)
+	fakeClient.PrependReactor("delete", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		// Simulate graceful termination (TerminationGracePeriodSeconds: 30):
+		// API server DELETE call succeeds, while final Pod/Delete event will not fire until grace period expires.
+		return true, nil, nil
+	})
+
+	preemptionStarted := make(chan struct{})
+	allowPreemptionFinish := make(chan struct{})
+	var preemptionPlugin *defaultpreemption.DefaultPreemption
+	outOfTreeRegistry := frameworkruntime.Registry{
+		"CustomDefaultPreemption": func(c context.Context, r runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+			p, err := frameworkruntime.FactoryAdapter(
+				plfeature.Features{EnableAsyncPreemption: true},
+				defaultpreemption.New,
+			)(c, &schedulerapi.DefaultPreemptionArgs{
+				MinCandidateNodesPercentage: 10,
+				MinCandidateNodesAbsolute:   100,
+			}, fh)
+			if err != nil {
+				return nil, err
+			}
+			preemptionPlugin = p.(*defaultpreemption.DefaultPreemption)
+			exec := preemptionPlugin.Executor.(*preemption.Executor)
+			origPreemptPod := exec.PreemptPod
+			exec.PreemptPod = func(ctx context.Context, c fwk.PreemptionCandidate, preemptor preemption.ExecutorPreemptor, victim *v1.Pod, pluginName string) (bool, error) {
+				close(preemptionStarted)
+				<-allowPreemptionFinish
+				return origPreemptPod(ctx, c, preemptor, victim, pluginName)
+			}
+			return p, nil
+		},
+	}
+
+	informerFactory := NewInformerFactory(fakeClient, 0, nil)
+	eventBroadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: fakeClient.EventsV1()})
+	defer eventBroadcaster.Shutdown()
+
+	sched, err := New(
+		ctx,
+		fakeClient,
+		informerFactory,
+		nil,
+		profile.NewRecorderFactory(eventBroadcaster),
+		WithFrameworkOutOfTreeRegistry(outOfTreeRegistry),
+		WithProfiles(schedulerapi.KubeSchedulerProfile{
+			SchedulerName: v1.DefaultSchedulerName,
+			Plugins: &schedulerapi.Plugins{
+				MultiPoint: schedulerapi.PluginSet{
+					Enabled: []schedulerapi.Plugin{
+						{Name: names.PrioritySort},
+						{Name: names.NodeResourcesFit},
+						{Name: "CustomDefaultPreemption"},
+						{Name: names.DefaultBinder},
+					},
+					Disabled: []schedulerapi.Plugin{
+						{Name: "*"},
+					},
+				},
+			},
+			PluginConfig: defaults.PluginConfigsV1,
+		}),
+	)
+	require.NoError(t, err)
+
+	informerFactory.Start(ctx.Done())
+	informerFactory.WaitForCacheSync(ctx.Done())
+	sched.SchedulingQueue.Run(logger)
+	defer sched.SchedulingQueue.Close()
+
+	// Wait for node1 and victim to be added to scheduler cache before creating preemptor.
+	require.Eventually(t, func() bool {
+		pod, err := sched.Cache.GetPod(victim)
+		return sched.Cache.NodeCount() == 1 && err == nil && pod != nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	_, err = fakeClient.CoreV1().Pods(v1.NamespaceDefault).Create(ctx, preemptor, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Wait for preemptor to enter activeQ and run one scheduling cycle.
+	require.Eventually(t, func() bool {
+		return len(sched.SchedulingQueue.PodsInActiveQ()) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	sched.ScheduleOne(ctx)
+
+	// Wait for prepareCandidateAsync to start and for preemptor to land in unschedulableEntities.
+	<-preemptionStarted
+	require.True(t, preemptionPlugin.Executor.IsPodRunningPreemption(preemptor.UID))
+	pInfo, ok := sched.SchedulingQueue.GetPod(ctx, preemptor.Name, preemptor.Namespace, nil)
+	require.True(t, ok)
+	// Initially after AddUnschedulablePodIfNotPresent, preemptor is NOT gated; only NodeResourcesFit is in UnschedulablePlugins.
+	require.False(t, pInfo.Gated(), "preemptor is not gated when initially added via AddUnschedulablePodIfNotPresent")
+	require.Empty(t, pInfo.GetGatingPlugin())
+	require.Empty(t, pInfo.GetGatingPluginEvents())
+	require.Equal(t, sets.New(names.NodeResourcesFit), pInfo.GetUnschedulablePlugins())
+
+	// Step 1: While prepareCandidateAsync is running (IsPodRunningPreemption == true),
+	// a new empty node (node2) is added to the cluster.
+	// NodeResourcesFit returns Queue, which triggers PriorityQueue -> runPreEnqueuePlugins -> DefaultPreemption.PreEnqueue.
+	// DefaultPreemption.PreEnqueue returns UnschedulableAndUnresolvable and stamps GatingPlugin = "DefaultPreemption"
+	// (with GatingPluginEvents = [AssignedPod/Delete]) onto pInfo.
+	node2 := st.MakeNode().Name("node2").UID("node2").Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Obj()
+	sched.addNodeToCache(node2)
+
+	pInfo, ok = sched.SchedulingQueue.GetPod(ctx, preemptor.Name, preemptor.Namespace, nil)
+	require.True(t, ok)
+	require.True(t, pInfo.Gated(), "DefaultPreemption.PreEnqueue gated preemptor while preemption was running")
+	require.Equal(t, names.DefaultPreemption, pInfo.GetGatingPlugin())
+	require.Equal(t, []fwk.ClusterEvent{{Resource: fwk.AssignedPod, ActionType: fwk.Delete}}, pInfo.GetGatingPluginEvents())
+	require.Equal(t, sets.New(names.NodeResourcesFit, names.DefaultPreemption), pInfo.GetUnschedulablePlugins())
+
+	// Step 2: Allow prepareCandidateAsync to finish (e.preempting.Delete(preemptor.UID)).
+	close(allowPreemptionFinish)
+	require.Eventually(t, func() bool {
+		return !preemptionPlugin.Executor.IsPodRunningPreemption(preemptor.UID)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Re-fetch pInfo from the queue after async preemption has finished.
+	pInfo, ok = sched.SchedulingQueue.GetPod(ctx, preemptor.Name, preemptor.Namespace, nil)
+	require.True(t, ok)
+	require.Equal(t, names.DefaultPreemption, pInfo.GetGatingPlugin(), "pInfo remains gated solely by DefaultPreemption even after async preemption finished")
+	require.Equal(t, []fwk.ClusterEvent{{Resource: fwk.AssignedPod, ActionType: fwk.Delete}}, pInfo.GetGatingPluginEvents())
+
+	// Bug Part 1 (Gate-without-replay):
+	// Even though node2 is completely empty and ready right now, and IsPodRunningPreemption(preemptor.UID) is now false,
+	// the wakeup from node2 was swallowed while preemption was running and was never replayed when preemption finished.
+	if len(sched.SchedulingQueue.PodsInActiveQ()) == 0 && len(sched.SchedulingQueue.PodsInBackoffQ()) == 0 {
+		t.Errorf("Bug Part 1 reproduced: after async preemption finished, preemptor was never re-queued despite node2 being added during preemption (Gated=%v, GatingPlugin=%q, UnschedulablePlugins=%v)",
+			pInfo.Gated(), pInfo.GetGatingPlugin(), pInfo.GetUnschedulablePlugins().UnsortedList())
+	}
+
+	// Step 3: Now that async preemption has completely finished (IsPodRunningPreemption == false),
+	// add ANOTHER brand-new empty node (node3) to the cluster.
+	node3 := st.MakeNode().Name("node3").UID("node3").Capacity(map[v1.ResourceName]string{v1.ResourceCPU: "4"}).Obj()
+	sched.addNodeToCache(node3)
+
+	pInfo, ok = sched.SchedulingQueue.GetPod(ctx, preemptor.Name, preemptor.Namespace, nil)
+	require.True(t, ok)
+	require.Equal(t, names.DefaultPreemption, pInfo.GetGatingPlugin())
+
+	// Bug Part 2 (Stale GatingPlugin filters out non-AssignedPod/Delete events even AFTER preemption finished):
+	// Because pInfo.GatingPlugin is still "DefaultPreemption" (whose EventsToRegister is only [AssignedPod/Delete]),
+	// PriorityQueue.moveEntitiesToActiveOrBackoffQueue skips EventNodeAdd for node3 at the entity.Gated() check!
+	if len(sched.SchedulingQueue.PodsInActiveQ()) == 0 && len(sched.SchedulingQueue.PodsInBackoffQ()) == 0 {
+		t.Errorf("Bug Part 2 reproduced: even AFTER async preemption finished (IsPodRunningPreemption=false), adding node3 (EventNodeAdd) is ignored because stale GatingPlugin=%q only matches %v",
+			pInfo.GetGatingPlugin(), pInfo.GetGatingPluginEvents())
+	}
+}
+
