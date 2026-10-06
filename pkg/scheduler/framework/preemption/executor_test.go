@@ -68,6 +68,8 @@ type fakeHandleForLister struct {
 	fwk.Handle
 	informerFactory informers.SharedInformerFactory
 	snapshot        fwk.SharedLister
+	podGroupManager fwk.PodGroupManager
+	nominatedPods   map[string][]fwk.PodInfo
 }
 
 func (f *fakeHandleForLister) SharedInformerFactory() informers.SharedInformerFactory {
@@ -76,6 +78,14 @@ func (f *fakeHandleForLister) SharedInformerFactory() informers.SharedInformerFa
 
 func (f *fakeHandleForLister) SnapshotSharedLister() fwk.SharedLister {
 	return f.snapshot
+}
+
+func (f *fakeHandleForLister) PodGroupManager() fwk.PodGroupManager {
+	return f.podGroupManager
+}
+
+func (f *fakeHandleForLister) NominatedPodsForNode(_ klog.Logger, nodeName string) []fwk.PodInfo {
+	return f.nominatedPods[nodeName]
 }
 
 func TestIsPodRunningPreemption(t *testing.T) {
@@ -2346,3 +2356,173 @@ func TestIsPodGroupWaitingForVictims(t *testing.T) {
 		})
 	}
 }
+
+func TestGetLowerPriorityNominatedPods(t *testing.T) {
+	makeNominatedPod := func(name, nodeName string, priority int32) *st.PodWrapper {
+		return st.MakePod().Name(name).UID(name).Namespace("default").NominatedNodeName(nodeName).Priority(priority)
+	}
+
+	tests := []struct {
+		name                    string
+		enableGenericWorkload   bool
+		enableCompositePodGroup bool
+		nominatedPods           []*v1.Pod
+		initPodGroups           []*schedulingv1beta1.PodGroup
+		initCompositePodGroups  []*schedulingv1alpha3.CompositePodGroup
+		preemptorPriority       int32
+		wantPodNames            []string
+	}{
+		{
+			name:              "returns nil when no pods are nominated on the node",
+			preemptorPriority: highPriority,
+			wantPodNames:      nil,
+		},
+		{
+			name: "returns only standalone pods nominated on the node with lower priority",
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("low-pod", "node1", lowPriority).Obj(),
+				makeNominatedPod("equal-pod", "node1", midPriority).Obj(),
+				makeNominatedPod("high-pod", "node1", highPriority).Obj(),
+				makeNominatedPod("other-node-pod", "node2", lowPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      []string{"low-pod"},
+		},
+		{
+			name:                  "returns pod when its PodGroup has lower priority than preemptor despite higher pod priority",
+			enableGenericWorkload: true,
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("pod-in-low-pg", "node1", highPriority).PodGroupName("low-pg").Obj(),
+			},
+			initPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("low-pg").Namespace("default").UID("low-pg").Priority(lowPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      []string{"pod-in-low-pg"},
+		},
+		{
+			name:                  "excludes pod when its PodGroup has higher priority than preemptor despite lower pod priority",
+			enableGenericWorkload: true,
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("pod-in-high-pg", "node1", lowPriority).PodGroupName("high-pg").Obj(),
+			},
+			initPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("high-pg").Namespace("default").UID("high-pg").Priority(highPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      nil,
+		},
+		{
+			name:                  "uses pod's own priority when GenericWorkload is disabled",
+			enableGenericWorkload: false,
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("low-pod-in-high-pg", "node1", lowPriority).PodGroupName("high-pg").Obj(),
+				makeNominatedPod("high-pod-in-low-pg", "node1", highPriority).PodGroupName("low-pg").Obj(),
+			},
+			initPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("high-pg").Namespace("default").UID("high-pg").Priority(highPriority).Obj(),
+				st.MakePodGroup().Name("low-pg").Namespace("default").UID("low-pg").Priority(lowPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      []string{"low-pod-in-high-pg"},
+		},
+		{
+			name:                    "returns pod when CompositePodGroup root has lower priority overriding higher child PodGroup and pod priority",
+			enableGenericWorkload:   true,
+			enableCompositePodGroup: true,
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("pod-in-cpg", "node1", highPriority).PodGroupName("child-pg").Obj(),
+			},
+			initPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("child-pg").Namespace("default").UID("child-pg").Priority(highPriority).ParentCompositePodGroup("root-cpg").Obj(),
+			},
+			initCompositePodGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("root-cpg").Namespace("default").UID("root-cpg").Priority(lowPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      []string{"pod-in-cpg"},
+		},
+		{
+			name:                    "excludes pod when CompositePodGroup root has higher priority overriding lower child PodGroup and pod priority",
+			enableGenericWorkload:   true,
+			enableCompositePodGroup: true,
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("pod-in-cpg", "node1", lowPriority).PodGroupName("child-pg").Obj(),
+			},
+			initPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("child-pg").Namespace("default").UID("child-pg").Priority(lowPriority).ParentCompositePodGroup("root-cpg").Obj(),
+			},
+			initCompositePodGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("root-cpg").Namespace("default").UID("root-cpg").Priority(highPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      nil,
+		},
+		{
+			name:                    "uses child PodGroup priority when CompositePodGroup is disabled",
+			enableGenericWorkload:   true,
+			enableCompositePodGroup: false,
+			nominatedPods: []*v1.Pod{
+				makeNominatedPod("pod-in-high-pg-low-cpg", "node1", highPriority).PodGroupName("high-pg").Obj(),
+				makeNominatedPod("pod-in-low-pg-high-cpg", "node1", lowPriority).PodGroupName("low-pg").Obj(),
+			},
+			initPodGroups: []*schedulingv1beta1.PodGroup{
+				st.MakePodGroup().Name("high-pg").Namespace("default").UID("high-pg").Priority(highPriority).ParentCompositePodGroup("low-cpg").Obj(),
+				st.MakePodGroup().Name("low-pg").Namespace("default").UID("low-pg").Priority(lowPriority).ParentCompositePodGroup("high-cpg").Obj(),
+			},
+			initCompositePodGroups: []*schedulingv1alpha3.CompositePodGroup{
+				st.MakeCompositePodGroup().Name("low-cpg").Namespace("default").UID("low-cpg").Priority(lowPriority).Obj(),
+				st.MakeCompositePodGroup().Name("high-cpg").Namespace("default").UID("high-cpg").Priority(highPriority).Obj(),
+			},
+			preemptorPriority: midPriority,
+			wantPodNames:      []string{"pod-in-low-pg-high-cpg"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			client := clientsetfake.NewSimpleClientset()
+			informerFactory := informers.NewSharedInformerFactory(client, 0)
+			cache := internalcache.New(ctx, nil, tt.enableGenericWorkload, tt.enableCompositePodGroup)
+			for _, pg := range tt.initPodGroups {
+				cache.AddGenericPodGroup(fwk.NewGenericPodGroup(pg))
+			}
+			for _, cpg := range tt.initCompositePodGroups {
+				cache.AddGenericPodGroup(fwk.NewGenericCompositePodGroup(cpg))
+			}
+
+			nominatedPods := make(map[string][]fwk.PodInfo)
+			for _, pod := range tt.nominatedPods {
+				pInfo, err := framework.NewPodInfo(pod)
+				if err != nil {
+					t.Fatal(err)
+				}
+				nominatedPods[pod.Status.NominatedNodeName] = append(nominatedPods[pod.Status.NominatedNodeName], pInfo)
+			}
+
+			fh := &fakeHandleForLister{
+				informerFactory: informerFactory,
+				podGroupManager: cache,
+				nominatedPods:   nominatedPods,
+			}
+			executor := NewExecutor(fh, feature.Features{
+				EnableGenericWorkload:   tt.enableGenericWorkload,
+				EnableCompositePodGroup: tt.enableCompositePodGroup,
+			})
+
+			gotPods := executor.getLowerPriorityNominatedPods(logger, tt.preemptorPriority, "node1")
+			var gotPodNames []string
+			for _, p := range gotPods {
+				gotPodNames = append(gotPodNames, p.Name)
+			}
+			if diff := cmp.Diff(tt.wantPodNames, gotPodNames); diff != "" {
+				t.Errorf("getLowerPriorityNominatedPods() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
