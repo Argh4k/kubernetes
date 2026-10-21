@@ -47,6 +47,7 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	plfeature "k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/gangscheduling"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/queuesort"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/schedulinggates"
@@ -11078,5 +11079,89 @@ func TestPreQueueingHint_PerPluginNarrowing(t *testing.T) {
 	}
 	if !slices.Contains(pluginBQueueingHintCalled, "pod2") {
 		t.Errorf("pluginB QueueingHintFn should be called for pod2, called for: %v", pluginBQueueingHintCalled)
+	}
+}
+
+// countingPreEnqueuePlugin wraps a PreEnqueue plugin and counts its PreEnqueue calls.
+type countingPreEnqueuePlugin struct {
+	fwk.PreEnqueuePlugin
+	calls int
+}
+
+func (pl *countingPreEnqueuePlugin) PreEnqueue(ctx context.Context, p *v1.Pod) *fwk.Status {
+	pl.calls++
+	return pl.PreEnqueuePlugin.PreEnqueue(ctx, p)
+}
+
+// podGroupHierarchyTrackerHandle is a fwk.Handle that only implements SharedPodGroupHierarchyTracker.
+type podGroupHierarchyTrackerHandle struct {
+	fwk.Handle
+	tracker fwk.PodGroupHierarchyTracker
+}
+
+func (h *podGroupHierarchyTrackerHandle) SharedPodGroupHierarchyTracker() fwk.PodGroupHierarchyTracker {
+	return h.tracker
+}
+
+func TestMoveAllToActiveOrBackoffQueueGatedGang(t *testing.T) {
+	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+		features.GenericWorkload: true,
+	})
+	logger, ctx := ktesting.NewTestContext(t)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	tracker := gangscheduling.NewHierarchyTracker(false)
+	pl, err := gangscheduling.New(ctx, nil, &podGroupHierarchyTrackerHandle{tracker: tracker}, plfeature.Features{})
+	if err != nil {
+		t.Fatalf("Failed to create the GangScheduling plugin: %v", err)
+	}
+	registeredEvents, err := pl.(fwk.EnqueueExtensions).EventsToRegister(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get the GangScheduling events: %v", err)
+	}
+	m := makeEmptyQueueingHintMapPerProfile()
+	for _, e := range registeredEvents {
+		m[""][e.Event] = append(m[""][e.Event], &QueueingHintFunction{PluginName: gangscheduling.Name, QueueingHintFn: e.QueueingHintFn})
+	}
+	gang := &countingPreEnqueuePlugin{PreEnqueuePlugin: pl.(fwk.PreEnqueuePlugin)}
+	q := NewTestQueue(ctx, newDefaultQueueSort(),
+		WithPreEnqueuePluginMap(map[string]map[string]fwk.PreEnqueuePlugin{"": {gangscheduling.Name: gang}}),
+		WithQueueingHintMapPerProfile(m))
+
+	podGroup := st.MakePodGroup().Name("pg").Namespace("ns1").MinCount(4).Obj()
+	tracker.AddGenericPodGroup(logger, fwk.NewGenericPodGroup(podGroup))
+	q.AddGenericPodGroup(logger, fwk.NewGenericPodGroup(podGroup))
+	// Three of the four pods are created, each added the way the scheduler's event handler adds an unscheduled pod.
+	for _, name := range []string{"p1", "p2", "p3"} {
+		pod := st.MakePod().Name(name).Namespace("ns1").UID(name).PodGroupName(podGroup.Name).Obj()
+		tracker.AddPod(logger, pod)
+		q.Add(ctx, pod)
+		q.MoveAllToActiveOrBackoffQueue(logger, framework.EventUnscheduledPodAdd, nil, pod, nil)
+	}
+
+	pgLookup := newQueuedPodGroupInfoForLookup(podGroup.Namespace, podGroup.Name, fwk.PodGroupKeyType)
+	if entity := q.unschedulableEntities.get(pgLookup); entity == nil || !entity.Gated() {
+		t.Fatalf("Expected the gang to be gated in unschedulableEntities")
+	}
+
+	// GangScheduling's QueueingHint skips pods added outside the gang.
+	const otherPods = 3
+	callsBefore := gang.calls
+	for i := range otherPods {
+		otherPod := st.MakePod().Name(fmt.Sprintf("other-%d", i)).Namespace("ns2").UID(fmt.Sprintf("other-%d", i)).Obj()
+		q.MoveAllToActiveOrBackoffQueue(logger, framework.EventUnscheduledPodAdd, nil, otherPod, nil)
+	}
+
+	entity := q.unschedulableEntities.get(pgLookup)
+	if entity == nil || !entity.Gated() {
+		t.Fatalf("Expected the gang to stay gated in unschedulableEntities")
+	}
+	if rerun := gang.calls - callsBefore; rerun != 0 {
+		rejectors := make(map[string][]string)
+		for pInfo := range entity.ForEachPodInfo() {
+			rejectors[pInfo.Pod.Name] = sets.List(pInfo.UnschedulablePlugins)
+		}
+		t.Errorf("Expected %d pods added outside the gang not to requeue the gated gang, but PreEnqueue ran %d more times; UnschedulablePlugins per pod: %v", otherPods, rerun, rejectors)
 	}
 }
